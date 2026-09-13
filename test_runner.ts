@@ -14,7 +14,7 @@ global.localStorage = {
   setItem(key: string, value: string) { this._store.set(key, value); },
   removeItem(key: string) { this._store.delete(key); },
   clear() { this._store.clear(); }
-};
+} as unknown as Storage;
 
 // App Setup
 const app = express();
@@ -175,7 +175,7 @@ async function runTests() {
   // ---------------------------------------------------------
   const originalFetch = global.fetch;
   
-  const { hydrateFromServer, saveAllInvoices } = await import('./services/dataService.js');
+  const { hydrateFromServer, saveAllInvoices } = (await import("./services/dataService.js")) as any; // await import('./services/dataService.js');
   const { initDB, enqueueMutation, getPendingMutations } = await import('./services/dbStore.js');
   
   await enqueueMutation({

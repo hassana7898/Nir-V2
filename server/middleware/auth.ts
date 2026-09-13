@@ -58,7 +58,7 @@ export const getSessionToken = (req: Request): string | null => {
 };
 
 export const requireAuth = async (req: Request, res: Response, next: NextFunction) => {
-  if (process.env.PGLITE_TEST === 'true') {
+  if (process.env.PGLITE_TEST === 'true' && process.env.NODE_ENV !== 'production') {
     req.user = { id: process.env.TEST_USER_ID || 'test_user_id', username: 'test', role: 'ADMIN' };
     return next();
   }
@@ -107,7 +107,7 @@ export const clearSessionCookie = async (req: Request, res: Response): Promise<v
 };
 
 export const requireRole = (...allowedRoles: string[]) => {
-  if (process.env.PGLITE_TEST === 'true') {
+  if (process.env.PGLITE_TEST === 'true' && process.env.NODE_ENV !== 'production') {
     return (req, res, next) => {
       req.user = { id: process.env.TEST_USER_ID || 'test_user_id', username: 'test', role: 'ADMIN' };
       next();

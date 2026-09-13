@@ -146,8 +146,7 @@ export const saveSettings = async (settings: Settings): Promise<void> => {
             id: crypto.randomUUID(),
             action: 'update',
             entityType: 'poultryAppSettings',
-            data: settings,
-            timestamp: Date.now()
+            payload: settings,
         });
     }
 };
@@ -170,11 +169,8 @@ export const addFarmer = async (farmerData: Partial<Farmer>): Promise<Farmer> =>
     const newFarmer: Farmer = {
         id: farmerData.id || `f_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
         name: farmerData.name?.trim() || 'مرغدار جدید',
-        phone: farmerData.phone || '',
         broods: farmerData.broods || [],
         isHidden: Boolean(farmerData.isHidden),
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
     };
     farmers.push(newFarmer);
     await dataStore.setItem(FARMERS_KEY, farmers);
@@ -190,8 +186,7 @@ export const addFarmer = async (farmerData: Partial<Farmer>): Promise<Farmer> =>
             id: crypto.randomUUID(),
             action: 'create',
             entityType: 'poultryAppFarmers',
-            data: newFarmer,
-            timestamp: Date.now()
+            payload: newFarmer,
         });
     }
     return newFarmer;
@@ -201,7 +196,7 @@ export const updateFarmer = async (id: string, updates: Partial<Farmer>): Promis
     const farmers = getFarmers();
     const index = farmers.findIndex(f => f.id === id);
     if (index > -1) {
-        const updated = { ...farmers[index], ...updates, updatedAt: Date.now() };
+        const updated = { ...farmers[index], ...updates };
         farmers[index] = updated;
         await dataStore.setItem(FARMERS_KEY, farmers);
 
@@ -216,8 +211,7 @@ export const updateFarmer = async (id: string, updates: Partial<Farmer>): Promis
                 id: crypto.randomUUID(),
                 action: 'update',
                 entityType: 'poultryAppFarmers',
-                data: updated,
-                timestamp: Date.now()
+                payload: updated,
             });
         }
     }
@@ -238,8 +232,7 @@ export const deleteFarmer = async (id: string): Promise<void> => {
             id: crypto.randomUUID(),
             action: 'delete',
             entityType: 'poultryAppFarmers',
-            data: { id },
-            timestamp: Date.now()
+            payload: { id },
         });
     }
 };
@@ -274,8 +267,7 @@ export const addDriver = async (name: string): Promise<void> => {
                 id: crypto.randomUUID(),
                 action: 'create',
                 entityType: 'poultryAppDrivers',
-                data: { id: trimmed, name: trimmed },
-                timestamp: Date.now()
+                payload: { id: trimmed, name: trimmed },
             });
         }
     }
@@ -295,8 +287,7 @@ export const deleteDriver = async (nameToDelete: string): Promise<void> => {
             id: crypto.randomUUID(),
             action: 'delete',
             entityType: 'poultryAppDrivers',
-            data: { id: nameToDelete, name: nameToDelete },
-            timestamp: Date.now()
+            payload: { id: nameToDelete, name: nameToDelete },
         });
     }
 };
@@ -354,8 +345,8 @@ export const getInvoicesByDate = <T extends Remittance>(type: 'entry' | 'exit', 
 export const addInvoice = async (invoiceData: any, type: 'entry' | 'exit'): Promise<void> => {
     const operationId = uuidv4();
     const id = invoiceData.id || `inv_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-    let newInvoice: any = { ...invoiceData, id, type, createdAt: Date.now(), updatedAt: Date.now(), version: 1 };
     
+    const newInvoice = { ...invoiceData, id, type };
     if (type === 'entry') {
         if (newInvoice.wastage === undefined) { 
              newInvoice.wastage = safeParseFloat(newInvoice.scaleWeight) - safeParseFloat(newInvoice.billWeight);
@@ -407,9 +398,9 @@ export const updateInvoice = async (id: string, updates: any): Promise<void> => 
     if (index === -1) return;
     
     const original = allInvoices[index];
-    const expectedVersion = original.version || 1;
+    const expectedVersion = (original as any).version || 1;
     const operationId = uuidv4();
-    const updated = { ...original, ...updates, updatedAt: Date.now() };
+    const updated = { ...original, ...updates };
     const type = 'sellerName' in updated ? 'entry' : 'exit';
     
     if ('scaleWeight' in updated && 'billWeight' in updated && updates.wastage === undefined) {
@@ -515,8 +506,7 @@ export const bulkMoveInvoicesByIds = async (type: 'entry' | 'exit', ids: string[
     const updated = allInvoices.map(inv => {
         if (ids.includes(inv.id)) {
             sourceDates.add(inv.date);
-            const upd = { ...inv, date: targetDateStr, updatedAt: Date.now() };
-            return upd;
+            return { ...inv, date: targetDateStr } as any;
         }
         return inv;
     });
@@ -543,8 +533,7 @@ export const bulkMoveInvoicesByIds = async (type: 'entry' | 'exit', ids: string[
                 id: crypto.randomUUID(),
                 action: 'update',
                 entityType: 'poultryAppInvoices',
-                data: inv,
-                timestamp: Date.now()
+                payload: inv,
             });
         }
     }
@@ -607,7 +596,7 @@ export const getFormulas = (): Formula[] => {
 
 export const saveFormula = async (f: any): Promise<Formula> => {
     const fs = getFormulas();
-    const newFormula = { ...f, id: f.id || `f_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`, createdAt: Date.now(), updatedAt: Date.now() };
+    const newFormula = { ...f, id: f.id || `fml_${Date.now()}_${Math.random().toString(36).substr(2, 5)}` } as any;
     fs.push(newFormula);
     await dataStore.setItem(FORMULAS_KEY, fs);
 
@@ -622,8 +611,7 @@ export const saveFormula = async (f: any): Promise<Formula> => {
             id: crypto.randomUUID(),
             action: 'create',
             entityType: 'poultryAppFormulas',
-            data: newFormula,
-            timestamp: Date.now()
+            payload: newFormula,
         });
     }
     return newFormula;
@@ -633,7 +621,7 @@ export const updateFormula = async (f: any): Promise<void> => {
     const fs = getFormulas();
     const i = fs.findIndex((x: any) => x.id === f.id);
     if (i > -1) {
-        const updated = { ...fs[i], ...f, updatedAt: Date.now() };
+        const updated = { ...fs[i], ...f };
         fs[i] = updated;
         await dataStore.setItem(FORMULAS_KEY, fs);
 
@@ -648,8 +636,7 @@ export const updateFormula = async (f: any): Promise<void> => {
                 id: crypto.randomUUID(),
                 action: 'update',
                 entityType: 'poultryAppFormulas',
-                data: updated,
-                timestamp: Date.now()
+                payload: updated,
             });
         }
     }
@@ -669,8 +656,7 @@ export const deleteFormula = async (id: string): Promise<void> => {
             id: crypto.randomUUID(),
             action: 'delete',
             entityType: 'poultryAppFormulas',
-            data: { id },
-            timestamp: Date.now()
+            payload: { id },
         });
     }
 };
@@ -682,7 +668,7 @@ export const getProductionRecords = (): ProductionRecord[] => {
 
 export const addProductionRecord = async (r: any): Promise<ProductionRecord> => {
     const rs = getProductionRecords();
-    const newRecord: ProductionRecord = { ...r, id: r.id || `p_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`, createdAt: Date.now(), updatedAt: Date.now() };
+    const newRecord = { ...r, id: r.id || `prod_${Date.now()}_${Math.random().toString(36).substr(2, 5)}` } as any;
     rs.push(newRecord);
     await dataStore.setItem(PRODUCTION_KEY, rs);
     invalidateInventoryCache();
@@ -698,8 +684,7 @@ export const addProductionRecord = async (r: any): Promise<ProductionRecord> => 
             id: crypto.randomUUID(),
             action: 'create',
             entityType: 'poultryAppProduction',
-            data: newRecord,
-            timestamp: Date.now()
+            payload: newRecord,
         });
     }
     return newRecord;
@@ -720,8 +705,7 @@ export const deleteProductionRecord = async (id: string): Promise<void> => {
             id: crypto.randomUUID(),
             action: 'delete',
             entityType: 'poultryAppProduction',
-            data: { id },
-            timestamp: Date.now()
+            payload: { id },
         });
     }
 };
@@ -738,7 +722,7 @@ export const getInventoryAdjustments = (): InventoryAdjustment[] => {
 
 export const addInventoryAdjustment = async (a: any): Promise<InventoryAdjustment> => {
     const as = getInventoryAdjustments();
-    const newAdj: InventoryAdjustment = { ...a, id: a.id || `a_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`, createdAt: Date.now(), updatedAt: Date.now() };
+    const newAdj = { ...a, id: a.id || `adj_${Date.now()}_${Math.random().toString(36).substr(2, 5)}` } as any;
     as.push(newAdj);
     await dataStore.setItem(ADJUSTMENTS_KEY, as);
     invalidateInventoryCache();
@@ -759,8 +743,7 @@ export const addInventoryAdjustment = async (a: any): Promise<InventoryAdjustmen
             id: crypto.randomUUID(),
             action: 'create',
             entityType: 'poultryAppAdjustments',
-            data: newAdj,
-            timestamp: Date.now()
+            payload: newAdj,
         });
     }
     return newAdj;
@@ -775,7 +758,6 @@ export const logAction = async (action: string, type: string, item: any, oldD?: 
     const logs = getLogs();
     const newLog: Log = {
         id: `log_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-        timestamp: Date.now(),
         action,
         actionText: `${type} ${action}`,
         type,
@@ -789,8 +771,7 @@ export const logAction = async (action: string, type: string, item: any, oldD?: 
         id: crypto.randomUUID(),
         action: 'create',
         entityType: 'poultryAppLogs',
-        data: newLog,
-        timestamp: Date.now()
+        payload: newLog,
     });
 };
 
@@ -923,6 +904,8 @@ export const migrateLegacyData = async () => {
 };
 
 // --- Warehouse Inventory Status ---
+const authoritativeStockCache = new Map<string, { timestamp: number, payload: Map<string, number> }>();
+const invalidateInventoryCache = () => { authoritativeStockCache.clear(); };
 export const getInventoryStatusAsync = async (until: Date): Promise<Map<string, number>> => {
     const untilDateStr = formatToISODate(until);
 
@@ -938,7 +921,6 @@ export const getInventoryStatusAsync = async (until: Date): Promise<Map<string, 
                 for (const [pId, qty] of Object.entries(res.data.stock)) {
                     stockMap.set(pId, qty);
                 }
-                authoritativeStockCache.set(untilDateStr, { timestamp: Date.now(), data: stockMap });
                 return stockMap;
             }
         } catch {
@@ -954,7 +936,7 @@ export const getInventoryStatus = (until: Date): Map<string, number> => {
     const untilDateStr = formatToISODate(until);
     const cached = authoritativeStockCache.get(untilDateStr);
     if (cached && Date.now() - cached.timestamp < 30000) {
-        return cached.data;
+        return cached.payload;
     }
 
     const settings = loadSettings();
@@ -962,9 +944,6 @@ export const getInventoryStatus = (until: Date): Map<string, number> => {
     settings.products.forEach(p => inventory.set(p.id, 0));
 
     const allTransactions: any[] = [];
-    getAllInvoices().forEach(inv => allTransactions.push({ date: inv.date, createdAt: inv.createdAt, type: 'invoice', data: inv }));
-    getProductionRecords().forEach(prod => allTransactions.push({ date: prod.date, createdAt: prod.createdAt, type: 'production', data: prod }));
-    getInventoryAdjustments().forEach(adj => allTransactions.push({ date: adj.date, createdAt: adj.createdAt, type: 'adjustment', data: adj }));
 
     allTransactions.sort((a, b) => a.date.localeCompare(b.date) || a.createdAt - b.createdAt);
     const formulaMap = new Map(getFormulas().map(f => [f.finishedGoodId, f.items]));
@@ -1103,7 +1082,6 @@ export const renameDriver = async (oldName: string, newName: string): Promise<nu
     const invs = getAllInvoices();
     let count = 0;
     const updated = invs.map(i => {
-        if (i.driverName === oldName) { count++; return { ...i, driverName: newName.trim(), updatedAt: Date.now() }; }
         return i;
     });
     if (count > 0) await saveAllInvoices(updated);
@@ -1120,7 +1098,7 @@ export const renameDriver = async (oldName: string, newName: string): Promise<nu
 
 export const renameFarmer = async (id: string, newName: string): Promise<void> => {
     const fs = getFarmers();
-    const updated = fs.map(f => f.id === id ? { ...f, name: newName.trim(), updatedAt: Date.now() } : f);
+    const updated = fs.map((f: any) => f.id === id ? { ...f, name: newName } : f);
     await saveFarmers(updated);
     const target = updated.find(f => f.id === id);
     if (target) {
@@ -1128,8 +1106,7 @@ export const renameFarmer = async (id: string, newName: string): Promise<void> =
             id: crypto.randomUUID(),
             action: 'update',
             entityType: 'poultryAppFarmers',
-            data: target,
-            timestamp: Date.now()
+            payload: target,
         });
     }
 };
@@ -1138,7 +1115,6 @@ export const mergeFarmers = async (sourceId: string, targetId: string): Promise<
     const invs = getAllInvoices();
     let count = 0;
     const updatedInvs = invs.map(i => {
-        if ('farmerId' in i && i.farmerId === sourceId) { count++; return { ...i, farmerId: targetId, updatedAt: Date.now() }; }
         return i;
     });
     await saveAllInvoices(updatedInvs);
@@ -1156,8 +1132,7 @@ export const mergeFarmers = async (sourceId: string, targetId: string): Promise<
             id: crypto.randomUUID(),
             action: 'update',
             entityType: 'poultryAppFarmers',
-            data: targetFarmer,
-            timestamp: Date.now()
+            payload: targetFarmer,
         });
     }
     return { invoiceCount: count };
@@ -1165,11 +1140,11 @@ export const mergeFarmers = async (sourceId: string, targetId: string): Promise<
 
 export const mergeProducts = async (sourceId: string, targetId: string): Promise<void> => {
     const allInvoices = getAllInvoices();
-    let updatedInvoices = allInvoices.map(inv => inv.productId === sourceId ? { ...inv, productId: targetId, updatedAt: Date.now() } : inv);
+    const updatedInvoices = allInvoices.map((i: any) => i.productId === sourceId ? { ...i, productId: targetId } : i);
     await saveAllInvoices(updatedInvoices);
 
     const productions = getProductionRecords();
-    const updatedProductions = productions.map(p => p.finishedGoodId === sourceId ? { ...p, finishedGoodId: targetId, updatedAt: Date.now() } : p);
+    const updatedProductions = productions.map((p: any) => p.productId === sourceId ? { ...p, productId: targetId } : p);
     await dataStore.setItem(PRODUCTION_KEY, updatedProductions);
 
     const formulas = getFormulas();
@@ -1190,12 +1165,11 @@ export const mergeProducts = async (sourceId: string, targetId: string): Promise
             else uniqueItems.push(item);
         });
 
-        return changed ? { ...f, finishedGoodId: newFinishedId, items: uniqueItems, updatedAt: Date.now() } : f;
     });
     await dataStore.setItem(FORMULAS_KEY, updatedFormulas);
 
     const adjustments = getInventoryAdjustments();
-    const updatedAdjustments = adjustments.map(a => a.productId === sourceId ? { ...a, productId: targetId, updatedAt: Date.now() } : a);
+    const updatedAdjustments = adjustments.map((a: any) => a.productId === sourceId ? { ...a, productId: targetId } : a);
     await dataStore.setItem(ADJUSTMENTS_KEY, updatedAdjustments);
 
     const settings = loadSettings();
@@ -1242,8 +1216,7 @@ export const addOrigin = async (name: string): Promise<void> => {
                 id: crypto.randomUUID(),
                 action: 'create',
                 entityType: 'poultryAppOrigins',
-                data: { id: trimmed, name: trimmed },
-                timestamp: Date.now()
+                payload: { id: trimmed, name: trimmed },
             });
         }
     }
@@ -1263,8 +1236,7 @@ export const deleteOrigin = async (nameToDelete: string): Promise<void> => {
             id: crypto.randomUUID(),
             action: 'delete',
             entityType: 'poultryAppOrigins',
-            data: { id: nameToDelete, name: nameToDelete },
-            timestamp: Date.now()
+            payload: { id: nameToDelete, name: nameToDelete },
         });
     }
 };
@@ -1368,7 +1340,7 @@ export const hydrateFromServer = async (): Promise<boolean> => {
     try {
         const apiRes = await sendRestRequest('/api/invoices');
         if (apiRes && apiRes.success !== false) { 
-            let fetchedInvoices = apiRes.data || (Array.isArray(apiRes) ? apiRes : apiRes.invoices);
+            let fetchedInvoices = apiRes.data || (Array.isArray(apiRes) ? apiRes : (apiRes as any).invoices);
             if (!Array.isArray(fetchedInvoices)) {
                 console.error("Hydration failed: Expected array of invoices, got something else.");
                 return false;

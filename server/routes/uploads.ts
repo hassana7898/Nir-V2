@@ -12,10 +12,10 @@ if (!fs.existsSync(uploadsDir)) {
 }
 
 const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
+  destination: (_req: any, _file: any, cb: any) => {
     cb(null, uploadsDir);
   },
-  filename: (_req, file, cb) => {
+  filename: (_req: any, file: any, cb: any) => {
     const ext = path.extname(file.originalname) || '.bin';
     const uniqueName = `${Date.now()}-${randomUUID().slice(0, 8)}${ext}`;
     cb(null, uniqueName);
@@ -29,16 +29,16 @@ const upload = multer({
 
 // POST /api/uploads - Upload single file
 router.post('/', upload.single('file'), (req, res) => {
-  if (!req.file) {
+  if (!((req as any).file)) {
     return res.status(400).json({ error: 'No file uploaded.' });
   }
 
-  const fileUrl = `/uploads/${req.file.filename}`;
+  const fileUrl = `/uploads/${((req as any).file).filename}`;
   res.status(201).json({
     success: true,
-    filename: req.file.filename,
-    originalName: req.file.originalname,
-    size: req.file.size,
+    filename: ((req as any).file).filename,
+    originalName: ((req as any).file).originalname,
+    size: ((req as any).file).size,
     url: fileUrl,
   });
 });

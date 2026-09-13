@@ -98,7 +98,7 @@ router.post('/', requireRole('ADMIN', 'MANAGER', 'ACCOUNTING', 'OPERATOR'), asyn
   if (!mutationId || !body.entityType || !body.action) return res.status(400).json({ error: 'Invalid sync mutation.' });
 
   try {
-    const result = await db.transaction(async (tx) => {
+    const result = await db.transaction(async (tx: any) => {
       const existing = await tx.select({ id: schema.sync_mutations.id }).from(schema.sync_mutations).where(eq(schema.sync_mutations.id, mutationId)).limit(1);
       if (existing.length) return { duplicate: true };
 

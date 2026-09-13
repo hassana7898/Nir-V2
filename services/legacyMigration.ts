@@ -1,7 +1,6 @@
 import { initDB, getSystemState, setSystemState, LegacyMigrationState, setCacheItem, enqueueMutation } from './dbStore';
 import { v4 as uuidv4 } from 'uuid';
 import { z } from 'zod';
-import { initDB } from './dbStore';
 
 const legacyInvoiceSchema = z.object({
   id: z.string(),

@@ -1,0 +1,8 @@
+{
+  "name": "Factory Remittance Manager",
+  "description": "A web application for managing factory entry and exit remittances, with features for reporting, logging, and data backup. The app is designed in Persian (Farsi) with a right-to-left layout.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

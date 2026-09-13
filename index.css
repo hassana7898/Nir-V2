@@ -1,0 +1,194 @@
+
+@import url('https://cdn.jsdelivr.net/gh/rastikerdar/sahel-font@v3.4.0/dist/font-face.css');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+    body {
+        font-family: 'Sahel', Tahoma, sans-serif;
+        background-color: #f1f5f9;
+    }
+}
+
+/* Custom Styles moved from index.html */
+.sortable-ghost {
+    opacity: 0.4;
+    background-color: #c7d2fe !important;
+}
+.sortable-chosen {
+    background-color: #e0e7ff !important;
+}
+.page-break-indicator {
+    border-top: 3px solid #f87171 !important;
+}
+.page-break-selector tr:hover {
+    background-color: #fef9c3 !important;
+    cursor: pointer;
+}
+
+/* DatePicker Overrides */
+.rmdp-container {
+    width: 100%;
+}
+.rmdp-input {
+    width: 100%;
+    height: 100%;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.5rem;
+    padding: 0.5rem;
+    text-align: center;
+    font-family: 'Sahel', Tahoma, sans-serif;
+    background-color: #f8fafc;
+}
+.rmdp-input:focus {
+    outline: none;
+    border-color: #3b82f6;
+    background-color: #fff;
+}
+
+/* --- Hide print-specific elements from the screen --- */
+@media screen {
+    #print-root {
+        display: none !important;
+    }
+}
+
+/* --- Professional Print Styles --- */
+@media print {
+    *, *::before, *::after {
+        box-sizing: border-box;
+    }
+    @page {
+        size: A4 landscape;
+        margin: 0.7cm 1.5cm; 
+    }
+
+    /* Hide non-printable elements */
+    .no-print {
+        display: none !important;
+    }
+    
+    #root {
+        display: none !important;
+    }
+    
+    #print-root, #print-root * {
+        visibility: visible !important;
+    }
+    #print-root {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%;
+    }
+
+    body {
+        background-color: #fff !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+    
+    .print-page {
+        position: relative;
+        page-break-after: always;
+        z-index: 0;
+    }
+    
+    .print-page::before {
+        content: '';
+        position: absolute;
+        top: 10%;
+        left: 10%;
+        width: 80%;
+        height: 80%;
+        background-image: var(--watermark-url);
+        background-repeat: no-repeat;
+        background-position: center;
+        background-size: contain;
+        opacity: 0.08;
+        z-index: 10; /* Changed from -1 to ensure visibility over white backgrounds */
+        pointer-events: none;
+        transform: rotate(-30deg);
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+
+    .print-page:last-of-type {
+            page-break-after: auto;
+    }
+    .page-break-before {
+        page-break-before: always !important;
+    }
+
+    table { 
+        width: 100%; 
+        font-size: 8.5pt;
+        border-collapse: collapse;
+        font-family: 'B Titr', Tahoma, sans-serif !important;
+        position: relative;
+        z-index: 20; /* Ensure text is above watermark */
+    }
+    
+    thead {
+        display: table-header-group;
+    }
+    
+    tbody tr {
+        page-break-inside: avoid;
+    }
+    
+    th, td {
+        padding: 4px;
+        border: 1px solid #333;
+        white-space: nowrap;
+        text-align: center;
+        vertical-align: middle;
+        background-color: transparent !important; /* Allow watermark to show through rows */
+    }
+
+    .print-header {
+        font-family: 'Sahel', Tahoma, sans-serif !important;
+        font-weight: normal !important;
+    }
+    .print-header h2, .print-header h3 {
+        margin: 0;
+        padding: 0;
+    }
+
+    .print-summary {
+        font-family: 'Sahel', Tahoma, sans-serif !important;
+        text-align: right;
+        padding: 10px 0;
+        page-break-before: auto;
+        padding-bottom: 4cm;
+    }
+    
+    .print-footer {
+        display: flex !important;
+        position: fixed;
+        bottom: 1cm;
+        left: 1.5cm;
+        right: 1.5cm;
+        justify-content: space-around;
+        align-items: flex-end;
+        font-family: 'Sahel', Tahoma, sans-serif !important;
+        font-size: 9pt;
+    }
+    
+    .sig-box {
+        width: 220px;
+        text-align: center;
+    }
+    .sig-box p {
+        border-top: 1px dotted #333;
+        padding-top: 8px;
+        margin-top: 50px;
+    }
+
+    body.bold-print, body.bold-print * {
+        font-weight: bold;
+        color: black;
+    }
+}

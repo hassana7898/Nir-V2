@@ -1,0 +1,41 @@
+{
+  "name": "factory-remittance-management",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server.ts",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "start": "node dist/server.cjs",
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@google/genai": "^1.42.0",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "pdfjs-dist": "3.11.174",
+    "react": "^18.2.0",
+    "react-date-object": "^2.1.9",
+    "react-dom": "^18.2.0",
+    "react-multi-date-picker": "^4.4.1",
+    "react-router-dom": "^6.22.0",
+    "recharts": "^2.12.7",
+    "sortablejs": "^1.15.2",
+    "sweetalert2": "^11.10.6",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/react": "^18.2.64",
+    "@types/react-dom": "^18.2.21",
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.17",
+    "esbuild": "^0.28.0",
+    "postcss": "^8.4.35",
+    "tailwindcss": "^3.4.1",
+    "tsx": "^4.22.3",
+    "typescript": "^5.2.2",
+    "vite": "^5.1.6"
+  }
+}

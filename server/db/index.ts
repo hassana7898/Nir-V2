@@ -5,6 +5,7 @@ import * as schema from './schema';
 
 dotenv.config();
 
+console.log("DB Module Init! PGLITE_TEST=", process.env.PGLITE_TEST);
 const databaseUrl = (process.env.DATABASE_URL || '').trim();
 
 let realPool: Pool | null = null;
@@ -92,6 +93,7 @@ if (process.env.PGLITE_TEST === 'true') {
 // Proxied Drizzle DB: When connected, calls real Drizzle. When not connected, fails with an actionable error.
 const dbProxyHandler: ProxyHandler<any> = {
   get(_target, prop) {
+    console.log("Proxy accessed prop:", prop, "drizzleDb is truthy:", !!drizzleDb);
     if (drizzleDb) {
       return (drizzleDb as any)[prop];
     }

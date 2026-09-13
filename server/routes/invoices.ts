@@ -1,3 +1,4 @@
+console.log("Invoices Module Init!");
 import express from 'express';
 import { z } from 'zod';
 import { findInvoicesWithPagination } from '../repositories/invoiceRepository';

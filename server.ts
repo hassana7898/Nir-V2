@@ -1,5 +1,6 @@
 import invoicesRouter from "./server/routes/invoices";
 import express from "express";
+import { db } from "./server/db";
 import path from "path";
 import cors from "cors";
 import { createServer as createViteServer } from "vite";
@@ -191,6 +192,10 @@ CONTEXT (Known Values to Help You):${contextStr}`;
 });
 
 async function startServer() {
+  if ((db as any).migrateDb) {
+    await (db as any).migrateDb();
+    console.log("Migrations applied to PGLite DB from server.ts.");
+  }
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },

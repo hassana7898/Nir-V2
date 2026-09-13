@@ -94,6 +94,7 @@ if (process.env.PGLITE_TEST === 'true') {
 const dbProxyHandler: ProxyHandler<any> = {
   get(_target, prop) {
     console.log("Proxy accessed prop:", prop, "drizzleDb is truthy:", !!drizzleDb);
+    if ((prop === 'migrateDb' || prop === 'then') && !drizzleDb) return undefined;
     if (drizzleDb) {
       return (drizzleDb as any)[prop];
     }

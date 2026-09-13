@@ -41,7 +41,7 @@ const dataStore = {
     setItem: async (key: string, value: any): Promise<void> => {
         memoryCache[key] = value;
         const db = await initDB();
-        await db.put('store', value, key);
+        await db.put('cache', value, key);
     }
 };
 
@@ -1367,13 +1367,17 @@ export const deleteInvoiceOnServer = async (id: string) => {
 export const hydrateFromServer = async (): Promise<boolean> => {
     try {
         const apiRes = await sendRestRequest('/api/invoices');
-        if (apiRes && apiRes.success !== false) { // it might just be the array if we didn't wrap it yet, actually our api returns {data: [...], success: true} or [...] based on what findInvoicesWithPagination returns. Wait, GET /api/invoices returns paginated data ( { data: [], total: x, page: 1, limit: 50, totalPages: 1 } ).
-            let fetchedInvoices = apiRes.data || (Array.isArray(apiRes) ? apiRes : apiRes.invoices) || [];
+        if (apiRes && apiRes.success !== false) { 
+            let fetchedInvoices = apiRes.data || (Array.isArray(apiRes) ? apiRes : apiRes.invoices);
+            if (!Array.isArray(fetchedInvoices)) {
+                console.error("Hydration failed: Expected array of invoices, got something else.");
+                return false;
+            }
             await saveAllInvoices(fetchedInvoices);
             return true;
         }
     } catch (e) {
-        console.error('Hydration failed', e);
+        console.error('Hydration failed DEBUG:', e);
     }
     return false;
 };

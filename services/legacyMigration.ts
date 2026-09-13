@@ -1,5 +1,14 @@
 import { initDB, getSystemState, setSystemState, LegacyMigrationState, setCacheItem, enqueueMutation } from './dbStore';
 import { v4 as uuidv4 } from 'uuid';
+import { z } from 'zod';
+import { initDB } from './dbStore';
+
+const legacyInvoiceSchema = z.object({
+  id: z.string(),
+  date: z.string().or(z.number()),
+  // minimal fields
+}).passthrough();
+
 
 const LEGACY_KEYS = [
   'poultryAppSettings',
@@ -29,8 +38,11 @@ export const runLegacyMigration = async () => {
       await setSystemState(migrationState);
     }
 
-    if (migrationState.status === 'COMPLETED' || migrationState.status === 'FAILED') {
-      return; // Already done
+    if (migrationState.status === 'COMPLETED') {
+      return; 
+    }
+    if (migrationState.status === 'FAILED') {
+      migrationState.status = 'NOT_STARTED'; // Reset to try again
     }
 
     if (migrationState.status === 'NOT_STARTED' || migrationState.status === 'IMPORTING') {
@@ -69,13 +81,17 @@ export const runLegacyMigration = async () => {
         try {
           const invoices = JSON.parse(invoicesStr);
           for (const inv of invoices) {
-            // Very simplistic: just queue them all as creations to ensure no data loss.
-            // A robust check would query the DB first. Idempotency will prevent duplicates.
+            const parsed = legacyInvoiceSchema.safeParse(inv);
+            if (!parsed.success) {
+              const db = await initDB();
+              await db.put('system', { id: 'dead_letter_' + (inv.id || uuidv4()), payload: inv, error: parsed.error.message });
+              continue; // Move to dead-letter, don't halt
+            }
             await enqueueMutation({
               id: uuidv4(),
               entityType: 'invoices',
               action: 'create',
-              payload: inv
+              payload: parsed.data
             });
           }
         } catch (e) {}

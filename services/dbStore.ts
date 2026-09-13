@@ -1,7 +1,7 @@
 import { openDB, IDBPDatabase } from 'idb';
 
 const DB_NAME = 'NirV2DB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 export interface SyncMutation {
   id: string; // operationId

@@ -1,10 +1,13 @@
+import invoicesRouter from "./server/routes/invoices";
 import express from "express";
 import path from "path";
 import cors from "cors";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 
-const app = express();
+export const app = express();
+app.use(express.json());
+app.use("/api/invoices", invoicesRouter);
 const PORT = 3000;
 
 app.use(cors());

@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, json, decimal, index, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, json, decimal, index, boolean, integer } from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
   id: text("id").primaryKey(),
@@ -64,7 +64,6 @@ export const products = pgTable("products", {
 
   version: integer("version").default(1).notNull(),
 
-  version: integer("version").default(1).notNull(),
 }, (t) => ({ nameIdx: index("products_name_idx").on(t.name), typeIdx: index("products_type_idx").on(t.type), categoryIdIdx: index("products_category_id_idx").on(t.categoryId) }));
 
 export const farmers = pgTable("farmers", {

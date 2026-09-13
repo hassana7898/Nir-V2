@@ -17,7 +17,20 @@ if (e2eTestRequested && isProductionEnv) {
   console.error('[NIR DB FATAL] E2E_TEST mock database is FORBIDDEN in production. Ignoring mock; PostgreSQL remains authoritative.');
 }
 
-if (e2eTestRequested && !isProductionEnv) {
+
+import { PGlite } from '@electric-sql/pglite';
+import { drizzle as drizzlePglite } from 'drizzle-orm/pglite';
+import { migrate } from 'drizzle-orm/pglite/migrator';
+
+if (process.env.PGLITE_TEST === 'true') {
+  console.log('[NIR DB] PGLite Test DB Enabled');
+  const client = new PGlite();
+  drizzleDb = drizzlePglite(client, { schema });
+  // Attach migrate function to db proxy
+  drizzleDb.migrateDb = async () => {
+    await migrate(drizzleDb, { migrationsFolder: './drizzle' });
+  };
+} else if (e2eTestRequested && !isProductionEnv) {
   console.log('[NIR DB] E2E DB Mock Enabled (non-production only)');
   const mockUsers = [];
   const mockQueryObj = (method, args) => {

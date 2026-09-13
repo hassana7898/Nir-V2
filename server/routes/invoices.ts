@@ -63,7 +63,7 @@ router.get('/', async (req, res) => {
     const productId = typeof req.query.productId === 'string' ? req.query.productId : undefined;
     const result = await findInvoicesWithPagination({ page, limit, type, search, startDate, endDate, farmerId, productId });
     res.json(result);
-  } catch (error: any) {
+  } catch (error: any) { console.error("INVOICE ERROR:", error);
     res.status(500).json(mapError(error));
   }
 });
@@ -76,7 +76,7 @@ router.post('/bulk-move', requireRole('ADMIN', 'MANAGER', 'ACCOUNTING', 'OPERATO
     }
     const movedCount = await bulkMoveInvoicesWithTransaction(ids, String(targetDate));
     res.json(createSuccessResponse({ movedCount }, req.headers['x-operation-id'] as string || 'bulk', 1));
-  } catch (error: any) {
+  } catch (error: any) { console.error("INVOICE ERROR:", error);
     res.status(400).json(mapError(error));
   }
 });
@@ -102,7 +102,7 @@ router.post('/', requireRole('ADMIN', 'MANAGER', 'ACCOUNTING', 'OPERATOR'), asyn
 
     const version = 1; // initial version
     res.status(201).json(createSuccessResponse(outcome.result, operationId, version));
-  } catch (error: any) {
+  } catch (error: any) { console.error("INVOICE ERROR:", error);
     const statusCode = error.code === 'CONFLICT' ? 409 : (error.code === 'IDEMPOTENCY_KEY_REUSED' ? 409 : 400);
     res.status(statusCode).json(mapError(error));
   }
@@ -130,7 +130,7 @@ router.put('/:id', requireRole('ADMIN', 'MANAGER', 'ACCOUNTING'), async (req, re
     });
 
     res.json(createSuccessResponse({ id }, operationId, outcome.result.version));
-  } catch (error: any) {
+  } catch (error: any) { console.error("INVOICE ERROR:", error);
     const statusCode = error.code === 'CONFLICT' ? 409 : (error.code === 'IDEMPOTENCY_KEY_REUSED' ? 409 : 400);
     res.status(statusCode).json(mapError(error));
   }
@@ -155,7 +155,7 @@ router.delete('/:id', requireRole('ADMIN', 'MANAGER'), async (req, res) => {
       }
     });
     res.json(createSuccessResponse(outcome.result, operationId, 0));
-  } catch (error: any) {
+  } catch (error: any) { console.error("INVOICE ERROR:", error);
     const statusCode = error.code === 'IDEMPOTENCY_KEY_REUSED' ? 409 : 400;
     res.status(statusCode).json(mapError(error));
   }

@@ -1,4 +1,4 @@
-# NIR V2 — Phase 2 Implementation Plan
+# NIR V2 — Phase 2 Implementation Plan (Revised)
 
 This document defines the exact boundaries, architecture, and strategies for the Nir-V2 bounded refactor. It explicitly avoids the "rewrite everything" anti-pattern and surgically targets the data-integrity flaws of the reference architecture.
 
@@ -9,13 +9,13 @@ This document defines the exact boundaries, architecture, and strategies for the
        │
        ├─ UI Components (React, RTL, Persian)  <-- PRESERVED
        │
-       ├─ [ IndexedDB Local Cache ] <-- Read-source for UI
+       ├─ [ IndexedDB Local Cache ] <-- Read-source for UI, augmented with expectedVersion
        │
        ├─ [ IndexedDB Sync Queue ]  <-- Outbox for offline mutations / Dead-letter queue
        │
-       └─ [ Client Data Service ]   <-- REFACTORED: Typed Results, Idempotency keys, explicit states
+       └─ [ Client Data Service ]   <-- REFACTORED: Typed Results, Idempotency keys, Explicit States
                    │
-                   ▼ (HTTP / JSON / Idempotency-Key Headers)
+                   ▼ (HTTP / JSON / Idempotency Headers / ExpectedVersion)
                    │
 [ Node.js Backend API ]             <-- MODULARIZED (Routes, Services, Repositories)
        │
@@ -23,7 +23,7 @@ This document defines the exact boundaries, architecture, and strategies for the
        │
        ├─ [ Business Services ]     <-- ADAPTED: Atomic transactions, Reversing entries for inventory
        │
-       └─ [ Drizzle ORM ]           <-- PRESERVED: Schema definition
+       └─ [ Drizzle ORM ]           <-- ADAPTED: version/revision columns, schema drift resolved
                    │
                    ▼
 [ PostgreSQL Database ]             <-- AUTHORITATIVE SOURCE OF TRUTH (nir_v2_test / production)
@@ -33,132 +33,132 @@ This document defines the exact boundaries, architecture, and strategies for the
 
 | Path / Module | Action | Details |
 |---|---|---|
-| `server/db/schema.ts` | **ADAPT** | Keep reference schema. Ensure `updatedAt` is strictly managed. Add `operationId` to sync tables. |
-| `server/routes/*` | **ADAPT** | Keep modular routes from reference. Add strict Zod validation. Map errors to standardized JSON responses. |
-| `server/services/invoiceService.ts` | **ADAPT** | Keep business logic (stock check, etc.). Reject hard-deletes of inventory. |
-| `server/services/inventoryService.ts` | **ADAPT** | Replace `deleteTransactionsByReference` with `insertReversingTransaction`. |
+| `server/db/schema.ts` | **ADAPT** | Keep reference schema but resolve schema drift (e.g., legacy invoice columns). Add `version` column for OCC. Add rich `sync_mutations` for idempotency tracking. |
+| `server/routes/*` | **ADAPT** | Keep modular routes from reference. Add strict validation. Map errors to standard JSON. |
+| `server/services/invoiceService.ts` | **ADAPT** | Keep business logic. Reject hard-deletes of inventory. |
+| `server/services/inventoryService.ts` | **ADAPT** | Replace physical deletes with reversing transactions. |
 | `server/middleware/auth.ts` | **KEEP** | Standard JWT/session checking. |
-| `services/dataService.ts` (Client) | **ADAPT** | Rewrite `addInvoice`, `updateInvoice`, `deleteInvoice` to await the API, parse explicit typed errors, and correctly manage IndexedDB. Reject generic `try/catch`. |
-| `services/dbStore.ts` (Client) | **ADAPT** | Rewrite `hydrateFromServer` (merge by `updatedAt`, validate array shapes). Rewrite `triggerSync` (dead-letter queue, 409 conflict handling). |
-| `shared/apiContract.ts` | **NEW** | Create strict TypeScript interfaces for `Result<T>` ensuring the UI knows exactly why a call failed. |
+| `services/dataService.ts` | **ADAPT** | Rewrite `add/update/delete` to await API, parse explicit errors, and manage IndexedDB safely. |
+| `services/dbStore.ts` | **ADAPT** | Rewrite `hydrateFromServer` (merge via `updatedAt`/`version`). Rewrite `triggerSync` (dead-letter queue). |
+| `shared/apiContract.ts` | **NEW** | Interfaces for `Result<T>` identifying specific failure reasons. |
 | `pages/*.tsx` (UI) | **KEEP** | Preserve current Nir-V2 workflows, RTL, and dashboard. |
-| `fix_*.cjs`, `patch_*.cjs` | **DELETE** | Remove legacy script clutter. |
-| `window.localStorage` (Business Data) | **REJECT** | Completely removed as a storage medium for invoices, products, etc. |
+| `legacy_scripts/*` (`fix_*.cjs`, etc.) | **CLASSIFY** | Do not blindly delete. Classify as `KEEP`, `ARCHIVE` (move to `/archive`), or `DELETE` based on relevance. |
 
 ## C. Database / Schema Migration Plan
 
-1. **Schema Validation**: Deploy the `server/db/schema.ts` to `nir_v2_test`.
-2. **Audit Trails**: Ensure `inventory_transactions` uses reversal entries instead of physical deletes.
-3. **Idempotency Tracking**: Enhance `sync_mutations` to act as a strict idempotency lock table (`operation_id` UNIQUE).
-4. No destructive migration is required for production as the forensic report confirms production is currently devoid of business data (only users/sessions).
+1. **Schema Validation & Drift Analysis**: 
+   - `invoices`: Model the legacy columns (`status`, `notes`, `created_by`, `updated_by`) that currently exist in PostgreSQL but are missing from Drizzle. 
+   - Add `version: integer("version").default(1).notNull()` to `invoices`, `inventory_transactions`, `products`, `farmers`, etc.
+   - Refactor `sync_mutations` to include `operationId`, `userId`, `resourceType`, `operationType`, `resourceId`, `requestFingerprint`, `status`, `originalResult`.
+2. **Audit Trails**: Ensure `inventory_transactions` uses reversal entries. Physical deletes (`deletedAt` or hard-delete) are prohibited for financial/inventory history.
+3. **Safety**: All testing and schema migrations during development MUST target an isolated database (`nir_v2_test`). Production data remains strictly untouched.
 
 ## D. API Contract
 
-Every mutation route (POST, PUT, DELETE) will return a discriminated union matching this interface:
+Mutation routes return a deterministic discriminated union:
 
 ```typescript
 type ApiResponse<T> = 
-  | { success: true; data: T; serverTimestamp: number; operationId: string }
+  | { success: true; data: T; serverTimestamp: number; operationId: string; version: number }
   | { success: false; error: ApiError };
 
 type ApiError = {
-  code: 'VALIDATION_FAILED' | 'AUTH_FAILED' | 'CONFLICT' | 'RATE_LIMITED' | 'SERVER_ERROR' | 'INSUFFICIENT_STOCK';
+  code: 'VALIDATION_FAILED' | 'AUTH_FAILED' | 'CONFLICT' | 'RATE_LIMITED' | 'SERVER_ERROR' | 'INSUFFICIENT_STOCK' | 'IDEMPOTENCY_KEY_REUSED';
   message: string;
   details?: Record<string, any>;
 };
 ```
-*Goal: The client must never collapse a `400 INSUFFICIENT_STOCK` and a `0 NETWORK_TIMEOUT` into the same boolean false.*
 
 ## E. Save State Machine
 
-When a user clicks "Save Havaleh":
 1. **Validate**: Client-side form validation.
-2. **Assign ID**: Generate globally unique `operationId` and `invoiceId`.
+2. **Assign Context**: Generate `operationId`, hash payload (fingerprint), and attach `expectedVersion` for updates.
 3. **Transmit**: `POST /api/invoices`
 4. **Evaluate Result**:
-   - `SUCCESS (2xx)`: Commit to IndexedDB Cache -> Show "ذخیره شد" -> Update UI.
-   - `ERROR (400/403/409/500)`: Show explicit error (e.g., "موجودی کافی نیست"). **Do not queue.** **Do not save locally.**
-   - `NETWORK FAILURE (Timeout/Offline)`: Save to IndexedDB Queue. Save to IndexedDB Cache as `status: 'pending'`. Show distinct "ذخیره در حالت آفلاین" (Saved Offline). Update UI.
+   - `SUCCESS`: Commit to local IndexedDB. Show "ذخیره شد". Update UI.
+   - `ERROR (400/403/409/500)`: Show explicit error. Do NOT queue offline. Do NOT save locally as normal.
+   - `NETWORK FAILURE`: Save to IndexedDB Queue. Save to IndexedDB Cache as `status: 'pending'`. Show distinct "ذخیره در حالت آفلاین" (Saved Offline). Update UI.
 
 ## F. Sync State Machine
 
 Background `triggerSync()` loops over `syncQueue`:
 1. **Filter**: Skip any item with `status === 'failed'` (Dead-letter).
-2. **Transmit**: Send payload with `operationId` header.
+2. **Transmit**: Send payload with `operationId`, hash, and `expectedVersion`.
 3. **Evaluate Result**:
-   - `SUCCESS (200)`: Remove from queue. Update local cache with authoritative server record (clears `pending` flag).
-   - `CONFLICT (409)`: Server is newer. Remove from queue. Overwrite local cache with server record. Notify UI.
-   - `VALIDATION (400)`: Move to Dead-Letter Queue (`status = 'failed'`). Do not block next items.
-   - `NETWORK ERROR`: Leave in queue. Backoff and retry later.
+   - `SUCCESS (200)`: Update cache with server record. Remove from queue.
+   - `CONFLICT (409)`: Server version is higher. Remove from queue. Overwrite local cache with authoritative server record.
+   - `VALIDATION/IDEMPOTENCY_ERROR (400/409)`: Move to Dead-Letter Queue (`failed`). Do not block remaining queue.
+   - `NETWORK ERROR`: Leave in queue. Backoff and retry.
 
 ## G. Hydration / Merge Algorithm
 
 1. `hydrateFromServer()` fetches `/api/sync/state`.
-2. **Validation Guard**: If the response is malformed (e.g., missing arrays), abort entirely. (Fixes Bug D6).
-3. **Merge, Don't Replace**: 
-   - Iterate server records.
-   - If server `updatedAt` >= local `updatedAt`, overwrite local.
-   - If local record exists with `status: 'pending'` (in outbox), DO NOT overwrite/delete it.
-4. **Queue Independence**: Hydration runs even if `syncQueue > 0`.
+2. **Validation Guard**: If response is malformed, abort.
+3. **Merge**: 
+   - Iterate server records. 
+   - Overwrite local if server `version` > local `version`.
+   - If local record exists with `status: 'pending'` (in outbox), do NOT overwrite it unless the server explicitly resolves it.
+4. **Queue Independence**: Hydration runs even if `syncQueue` > 0. It must never erase valid pending local records.
 
-## H. Conflict-Resolution Strategy
+## H. Conflict-Resolution Strategy (Optimistic Concurrency Control)
 
-**Last-Write-Wins (LWW) with Server Authority**.
-All local cache records hold an `updatedAt` timestamp provided by the server. 
-When a client sends an `update`, it includes this `updatedAt`.
-If the server's database `updatedAt` is strictly greater than the client's provided `updatedAt`, the server rejects the write with `409 CONFLICT` and returns the newer authoritative record.
+Replaces naive Last-Write-Wins (LWW).
+1. Every record has a monotonically increasing `version` (integer).
+2. Client sends an update mutation containing the `expectedVersion` (what the client currently sees).
+3. **Server Logic**:
+   - If `client.expectedVersion !== server.version`: Reject with `409 CONFLICT` and return the authoritative server record.
+   - If matched: Execute transaction, increment `version` by 1.
 
 ## I. Idempotency Strategy
 
-Every UI creation action generates a V4 UUID `operationId`. 
-This is sent in the header `X-Operation-Id`.
-The server wraps the business transaction and an insert into `sync_mutations(operation_id)`.
-If a network timeout occurs and the client retries the exact same `operationId`, the server catches the Unique Constraint violation on `sync_mutations` and safely returns `200 OK` (Duplicate acknowledged), preventing double-billing or double-inventory reduction.
+Duplicate `operationId` is NOT automatically successful. We prevent duplicated side-effects if retries occur due to lost responses (Network Timeouts).
+
+1. **Storage**: Atomically with the business transaction, insert into `idempotency_keys`: `operationId`, `userId`, `resourceType`, `operationType`, `resourceId`, `requestFingerprint`, `status`, `originalResult`, `createdAt`.
+2. **Server Check**:
+   - Same `operationId` + same fingerprint -> Return `originalResult` without re-executing.
+   - Same `operationId` + different fingerprint -> Reject with `409 IDEMPOTENCY_KEY_REUSED`.
 
 ## J. Dead-Letter Queue Design
 
-If a queued offline mutation is ultimately rejected by the server due to business rules (e.g., stock ran out while offline), the sync engine marks it `failed` and records the `lastError`.
-- It remains in `syncQueue` but is ignored by the active sync loop.
-- The UI surfaces a red indicator in the header: "X عملیات ناموفق".
-- The user can click this to view, discard, or manually correct the failed operations.
-- Hydration is never blocked by dead letters.
+Failed sync items due to strict business rejections (e.g., `400 INSUFFICIENT_STOCK` or `409 IDEMPOTENCY_KEY_REUSED`) move to `failed` state.
+- They remain in `syncQueue` for audit but are ignored by the active sync loop.
+- They never block hydration or unrelated pending mutations.
+- The UI exposes a "Failed Syncs" indicator for manual user resolution/dismissal.
 
 ## K. Backup / Restore Strategy
 
-- **DB Authority**: The daily Postgres `pg_dump` is the absolute disaster-recovery source.
-- **App Export/Import**: `GET /api/backup/export` generates a JSON snapshot.
-- **Restore Safety**: `POST /api/backup/restore` operates entirely within a single PostgreSQL `tx`. 
-  - It inserts in strict Foreign-Key order (Categories -> Products -> Farmers -> Invoices).
-  - If a single record fails validation or FK checks, `tx.rollback()` is invoked automatically. The DB remains completely untouched.
+- **DB Authority**: `pg_dump` remains the disaster-recovery source.
+- **Restore Safety**: `POST /api/backup/restore` operates entirely within one PostgreSQL transaction in exact foreign-key order. If any record fails validation, the entire transaction rolls back cleanly.
 
-## L. Migration Strategy from Nir-V2 localStorage
+## L. Migration Strategy from Nir-V2 LocalStorage
 
-On first boot of the new version:
-1. Check for `localStorage.getItem('poultryAppInvoices')`.
-2. If found, translate all business data into IndexedDB.
-3. Queue any un-synced data into `syncQueue` with `operationId`s.
-4. Call `localStorage.removeItem(...)` to ensure this only runs once.
+Resumable state machine to transition from LocalStorage to IndexedDB safely.
+States: `NOT_STARTED` -> `IMPORTING` -> `IMPORTED` -> `SYNCING` -> `COMPLETED` | `FAILED`.
 
-## M. Test Strategy
+1. Check for legacy `poultryApp*` keys in LocalStorage. If missing, skip.
+2. Mark state as `IMPORTING`. Transcribe data into IndexedDB.
+3. Mark state as `IMPORTED`. Identify unsynced operations and push to `syncQueue` (`SYNCING`).
+4. **Restart-Safe**: If interrupted, the next boot resumes without duplicating records.
+5. Only upon reaching `COMPLETED` is LocalStorage explicitly wiped of legacy business data.
 
-Isolated testing on `nir_v2_test`:
-1. **Auth**: Session creation, rejection, and invalid credentials.
-2. **Idempotency**: Fire two identical POST requests concurrently -> assert exactly 1 invoice and 1 inventory movement created.
-3. **Rollback**: Delete an invoice -> assert inventory reversing transaction is generated correctly (no hard deletes).
-4. **Sync Conflict**: Attempt to update an invoice using an old `updatedAt` timestamp -> assert 409 Conflict.
-5. **Full Lifecycle (End-to-End)**: 
-   - Create Havaleh (Online) -> Verify Postgres.
-   - Create Havaleh (Offline) -> Verify Local Pending state.
-   - Go Online -> Sync -> Verify Postgres -> Verify UI Pending state removed.
-   - Backup -> Restore on blank DB -> Verify exact counts and relationships.
+## M. Test Strategy (Test Matrix)
+
+All tests will run on an isolated `nir_v2_test` database.
+
+1. **A. Idempotency**: Same `operationId` + same payload -> exactly ONE business transaction executed, 200 OK returned twice.
+2. **B. Idempotency collision**: Same `operationId` + different payload -> `409 IDEMPOTENCY_KEY_REUSED`.
+3. **C. Optimistic Concurrency**: First mutation succeeds, second mutation with same `expectedVersion` -> `409 CONFLICT`.
+4. **D. Migration Crash Recovery**: Simulate interruption during LocalStorage -> IndexedDB migration. Restart. Verify no loss and no duplicates.
+5. **E. Network Timeout Recovery**: Server commits -> response lost -> client retries `operationId` -> verify exactly one invoice and one inventory movement in DB.
+6. **F. Hydration Preservation**: Hydration with pending mutations must not erase valid pending local records.
+7. **G. Dead-Letter Isolation**: A business rejection (e.g. 400 stock error) moves to dead-letter and does NOT block hydration or other queue items.
 
 ## N. Rollback Strategy
 
-Since the production PostgreSQL DB contains no business data currently, rollback consists purely of redeploying the previous Nir-V2 frontend static build, which natively falls back to `localStorage`.
+Production DB contains no business data. Frontend rollback consists of deploying the previous static build utilizing LocalStorage.
 
 ## O. Production Deployment Strategy
 
-1. Execute Drizzle migrations `npm run db:migrate` on Production Postgres.
-2. Deploy the Express Backend.
-3. Deploy the Vite Frontend.
-4. Ensure `sw.js` cache version is bumped to force immediate client invalidation of old frontend assets.
+1. Run `npm run db:migrate` on Production Postgres.
+2. Deploy backend, deploy frontend. 
+3. Bump `sw.js` cache version.

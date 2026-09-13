@@ -286,7 +286,7 @@ const EntryPage: React.FC = () => {
                 setTimeout(() => firstInputRef.current?.focus(), 100);
             }
             fetchEntries();
-        } catch (e) { showToast('خطا در ذخیره', 'error'); }
+        } catch (e: any) { showToast(e?.message || 'خطا در ذخیره', 'error'); }
     };
 
     const handleKeyDown = (e: React.KeyboardEvent) => {

@@ -196,9 +196,11 @@ const errorHandler = (err: any, _req: express.Request, res: express.Response, _n
 
 // ---------------------------------------------------------------- bootstrap
 async function startServer() {
-  if ((db as any).migrateDb) {
+  // PGlite migrations are a development/test concern only; production runs on PostgreSQL
+  // whose schema is provisioned explicitly (migrations/0001_v2_upgrade.sql).
+  if (process.env.PGLITE_TEST === 'true' && process.env.NODE_ENV !== 'production') {
     await (db as any).migrateDb();
-    console.log("[NIR] PGLite test database migrated (non-production only).");
+    console.log("[NIR] PGlite test database migrated (development only).");
   }
 
   if (process.env.NODE_ENV !== "production") {

@@ -5,7 +5,6 @@ import * as schema from './schema';
 
 dotenv.config();
 
-
 const databaseUrl = (process.env.DATABASE_URL || '').trim();
 
 let realPool: Pool | null = null;
@@ -18,24 +17,32 @@ if (e2eTestRequested && isProductionEnv) {
   console.error('[NIR DB FATAL] E2E_TEST mock database is FORBIDDEN in production. Ignoring mock; PostgreSQL remains authoritative.');
 }
 
-
-import { PGlite } from '@electric-sql/pglite';
-import { drizzle as drizzlePglite } from 'drizzle-orm/pglite';
-import { migrate } from 'drizzle-orm/pglite/migrator';
+// PGlite is a DEVELOPMENT-ONLY dependency. It is imported lazily so the production
+// bundle never requires it and stays self-contained (no node_modules on the server).
+let pgliteReady: Promise<void> | null = null;
 
 if (process.env.PGLITE_TEST === 'true' && !isProductionEnv) {
-  console.log('[NIR DB] PGLite Test DB Enabled');
-  const client = new PGlite();
-  drizzleDb = drizzlePglite(client, { schema });
-  // Attach migrate function to db proxy
-  drizzleDb.migrateDb = async () => {
-    await migrate(drizzleDb, { migrationsFolder: './drizzle' });
-  };
+  console.log('[NIR DB] PGlite Test DB Enabled');
+  pgliteReady = (async () => {
+    try {
+      const { PGlite } = await import('@electric-sql/pglite');
+      const { drizzle: drizzlePglite } = await import('drizzle-orm/pglite');
+      const { migrate } = await import('drizzle-orm/pglite/migrator');
+      const client = new PGlite();
+      const pgliteDb: any = drizzlePglite(client, { schema });
+      pgliteDb.migrateDb = async () => {
+        await migrate(pgliteDb, { migrationsFolder: './drizzle' });
+      };
+      drizzleDb = pgliteDb;
+    } catch (err: any) {
+      console.error('[NIR DB] PGlite initialisation failed:', err?.message || err);
+    }
+  })();
 } else if (e2eTestRequested && !isProductionEnv) {
   console.log('[NIR DB] E2E DB Mock Enabled (non-production only)');
   const mockUsers: any[] = [];
   const mockQueryObj = (method: string, args: any) => {
-    let q = {
+    const q: any = {
       from: () => q,
       where: () => q,
       limit: () => q,
@@ -53,7 +60,7 @@ if (process.env.PGLITE_TEST === 'true' && !isProductionEnv) {
     };
     return q;
   };
-  
+
   drizzleDb = {
     select: (...args: any[]) => mockQueryObj('select', args),
     insert: (...args: any[]) => mockQueryObj('insert', args),
@@ -84,23 +91,28 @@ if (process.env.PGLITE_TEST === 'true' && !isProductionEnv) {
 } else {
   if (process.env.NODE_ENV === 'production') {
     console.error('[NIR DB FATAL] DATABASE_URL is not set. PostgreSQL is the authoritative source of truth. Please configure DATABASE_URL in .env');
-    
   } else {
     console.warn('[NIR DB WARN] DATABASE_URL is not set. Database operations will return an actionable configuration error until DATABASE_URL is provided.');
   }
 }
 
-// Proxied Drizzle DB: When connected, calls real Drizzle. When not connected, fails with an actionable error.
+// Proxied Drizzle DB: when connected, calls the real Drizzle instance; when not
+// connected, fails with an actionable error.
 const dbProxyHandler: ProxyHandler<any> = {
   get(_target, prop) {
-    
-    if ((prop === 'migrateDb' || prop === 'then') && !drizzleDb) return undefined;
+    if (prop === 'migrateDb') {
+      return async () => {
+        if (pgliteReady) await pgliteReady;
+        if (drizzleDb && typeof drizzleDb.migrateDb === 'function') await drizzleDb.migrateDb();
+      };
+    }
+    if (prop === 'then' && !drizzleDb) return undefined;
     if (drizzleDb) {
       return (drizzleDb as any)[prop];
     }
-    // Return a function or builder that rejects with a clear message
+    // Return a builder that rejects with a clear message
     return (..._args: any[]) => {
-      const errorMsg = 'پایگاه داده PostgreSQL متصل نیست. لطفا متغیر DATABASE_URL را در فایل .env تنظیم نمایید.';
+      const errorMsg = 'اتصال به PostgreSQL برقرار نشد. لطفاً مقدار DATABASE_URL را در فایل .env بررسی کنید.';
       const queryObj: any = {
         from: () => queryObj,
         where: () => queryObj,
@@ -142,7 +154,7 @@ export const checkDbHealth = async (): Promise<{ status: 'connected' | 'disconne
     return {
       status: 'disconnected',
       engine: 'postgresql',
-      error: 'DATABASE_URL is not configured. Please configure DATABASE_URL in .env (e.g., postgresql://postgres:password@localhost:5432/nir_db).'
+      error: 'DATABASE_URL is not configured. Please configure DATABASE_URL in .env (e.g., postgresql://postgres:***@localhost:5432/nir_db).'
     };
   }
   try {

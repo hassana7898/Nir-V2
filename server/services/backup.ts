@@ -218,7 +218,7 @@ export const restoreDatabase = async (backupData: any): Promise<RestoreReport> =
           await tx.insert(table).values(values).onConflictDoUpdate({ target: table.id, set: values });
         } catch (error: any) {
           const id = row && typeof row === 'object' ? (row as { id?: unknown }).id : undefined;
-          throw new Error(`بازیابی جدول «${entity}» ناموفق بود (رکورد ${String(id ?? '?')}): ${error?.message || error}`, { cause: error });
+          throw new Error(`بازیابی جدول «${entity}» ناموفق بود (رکورد ${String(id ?? '?')}): ${error?.message || error}`);
         }
       }
       restoredTables[entity] = (rows as unknown[]).length;

@@ -1,4 +1,3 @@
-
 import express from 'express';
 import { z } from 'zod';
 import { findInvoicesWithPagination } from '../repositories/invoiceRepository';
@@ -10,7 +9,7 @@ import {
 } from '../services/invoiceService';
 import { requireRole } from '../middleware/auth';
 import { executeIdempotentOperation } from '../services/idempotencyService';
-import { createSuccessResponse, createErrorResponse } from '../../shared/apiContract';
+import { createSuccessResponse, createErrorResponse, toApiError } from '../../shared/apiContract';
 import { db } from '../db';
 import { invoices } from '../db/schema';
 import { eq } from 'drizzle-orm';
@@ -35,6 +34,7 @@ const InvoiceSchema = z.object({
   driverIBAN: z.string().optional(),
   wastage: z.union([z.string(), z.number()]).optional(),
   farmerId: z.string().optional(),
+  farmerName: z.string().optional(),
   weight: z.union([z.string(), z.number()]).optional(),
   invoiceNumber: z.string().optional(),
   productVariant: z.string().optional(),
@@ -43,15 +43,7 @@ const InvoiceSchema = z.object({
   expectedVersion: z.number().optional(),
 });
 
-// Helper to map errors to API Contract
-const mapError = (error: any) => {
-  if (error.code === 'CONFLICT') return createErrorResponse('CONFLICT', error.message, { authoritativeRecord: error.authoritativeRecord });
-  if (error.code === 'IDEMPOTENCY_KEY_REUSED') return createErrorResponse('IDEMPOTENCY_KEY_REUSED', error.message);
-  if (error.message?.includes('موجودی محصول کافی نیست')) return createErrorResponse('INSUFFICIENT_STOCK', error.message);
-  if (error instanceof z.ZodError) return createErrorResponse('VALIDATION_FAILED', 'اطلاعات وارد شده نامعتبر است.', { errors: error.errors });
-  return createErrorResponse('SERVER_ERROR', error.message || 'خطای سرور');
-};
-
+// GET /api/invoices - Paginated, filtered invoice list
 router.get('/', async (req, res) => {
   try {
     const page = parseInt(String(req.query.page || '1'), 10) || 1;
@@ -64,31 +56,39 @@ router.get('/', async (req, res) => {
     const productId = typeof req.query.productId === 'string' ? req.query.productId : undefined;
     const result = await findInvoicesWithPagination({ page, limit, type, search, startDate, endDate, farmerId, productId });
     res.json(result);
-  } catch (error: any) { console.error("INVOICE ERROR:", error);
-    res.status(500).json(mapError(error));
+  } catch (error: any) {
+    const { status, body } = toApiError(error);
+    res.status(status).json(body);
   }
 });
 
+// POST /api/invoices/bulk-move - Move multiple invoices inside one transaction
 router.post('/bulk-move', requireRole('ADMIN', 'MANAGER', 'ACCOUNTING', 'OPERATOR'), async (req, res) => {
   try {
     const { ids, targetDate } = req.body;
     if (!Array.isArray(ids) || ids.length === 0 || !targetDate) {
-      return res.status(400).json(createErrorResponse('VALIDATION_FAILED', 'ids array and targetDate are required.'));
+      return res.status(422).json(createErrorResponse('VALIDATION_FAILED', 'ids array and targetDate are required.'));
     }
     const movedCount = await bulkMoveInvoicesWithTransaction(ids, String(targetDate));
-    res.json(createSuccessResponse({ movedCount }, req.headers['x-operation-id'] as string || 'bulk', 1));
-  } catch (error: any) { console.error("INVOICE ERROR:", error);
-    res.status(400).json(mapError(error));
+    res.json(createSuccessResponse({ movedCount }, (req.headers['x-operation-id'] as string) || 'bulk', 1));
+  } catch (error: any) {
+    const { status, body } = toApiError(error);
+    res.status(status).json(body);
   }
 });
 
+// POST /api/invoices - Create invoice (idempotent, transactional)
 router.post('/', requireRole('ADMIN', 'MANAGER', 'ACCOUNTING', 'OPERATOR'), async (req, res) => {
   try {
     const operationId = req.headers['x-operation-id'] as string;
-    if (!operationId) return res.status(400).json(createErrorResponse('VALIDATION_FAILED', 'X-Operation-Id header is required.'));
-    
-    const parsedData = InvoiceSchema.parse(req.body);
-    
+    if (!operationId) return res.status(422).json(createErrorResponse('VALIDATION_FAILED', 'X-Operation-Id header is required.'));
+
+    const parsed = InvoiceSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(422).json(createErrorResponse('VALIDATION_FAILED', 'اطلاعات ارسالی نامعتبر است.', { errors: parsed.error.issues }));
+    }
+    const parsedData = parsed.data;
+
     const outcome = await executeIdempotentOperation({
       operationId,
       userId: (req as any).user?.id || null,
@@ -97,25 +97,31 @@ router.post('/', requireRole('ADMIN', 'MANAGER', 'ACCOUNTING', 'OPERATOR'), asyn
       payload: parsedData,
       execute: async (tx) => {
         const id = await createInvoiceInTransaction(tx, parsedData as any);
-        return { id };
+        return { id, version: 1 };
       }
     });
 
-    const version = 1; // initial version
+    const version = (outcome.result && outcome.result.version) || 1;
     res.status(201).json(createSuccessResponse(outcome.result, operationId, version));
-  } catch (error: any) { console.error("INVOICE ERROR:", error);
-    const statusCode = error.code === 'CONFLICT' ? 409 : (error.code === 'IDEMPOTENCY_KEY_REUSED' ? 409 : 400);
-    res.status(statusCode).json(mapError(error));
+  } catch (error: any) {
+    const { status, body } = toApiError(error);
+    res.status(status).json(body);
   }
 });
 
+// PUT /api/invoices/:id - Update invoice (OCC + idempotent, transactional)
 router.put('/:id', requireRole('ADMIN', 'MANAGER', 'ACCOUNTING'), async (req, res) => {
   try {
     const operationId = req.headers['x-operation-id'] as string;
-    if (!operationId) return res.status(400).json(createErrorResponse('VALIDATION_FAILED', 'X-Operation-Id header is required.'));
+    if (!operationId) return res.status(422).json(createErrorResponse('VALIDATION_FAILED', 'X-Operation-Id header is required.'));
     const id = String(req.params.id);
-    const parsedData = InvoiceSchema.partial().parse(req.body);
-    
+
+    const parsed = InvoiceSchema.partial().safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(422).json(createErrorResponse('VALIDATION_FAILED', 'اطلاعات ارسالی نامعتبر است.', { errors: parsed.error.issues }));
+    }
+    const parsedData = parsed.data;
+
     const outcome = await executeIdempotentOperation({
       operationId,
       userId: (req as any).user?.id || null,
@@ -131,17 +137,18 @@ router.put('/:id', requireRole('ADMIN', 'MANAGER', 'ACCOUNTING'), async (req, re
     });
 
     res.json(createSuccessResponse({ id }, operationId, outcome.result.version));
-  } catch (error: any) { console.error("INVOICE ERROR:", error);
-    const statusCode = error.code === 'CONFLICT' ? 409 : (error.code === 'IDEMPOTENCY_KEY_REUSED' ? 409 : 400);
-    res.status(statusCode).json(mapError(error));
+  } catch (error: any) {
+    const { status, body } = toApiError(error);
+    res.status(status).json(body);
   }
 });
 
+// DELETE /api/invoices/:id - Soft-delete invoice + reversing ledger entry
 router.delete('/:id', requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   try {
     const operationId = req.headers['x-operation-id'] as string;
-    if (!operationId) return res.status(400).json(createErrorResponse('VALIDATION_FAILED', 'X-Operation-Id header is required.'));
-    
+    if (!operationId) return res.status(422).json(createErrorResponse('VALIDATION_FAILED', 'X-Operation-Id header is required.'));
+
     const id = String(req.params.id);
     const outcome = await executeIdempotentOperation({
       operationId,
@@ -156,9 +163,9 @@ router.delete('/:id', requireRole('ADMIN', 'MANAGER'), async (req, res) => {
       }
     });
     res.json(createSuccessResponse(outcome.result, operationId, 0));
-  } catch (error: any) { console.error("INVOICE ERROR:", error);
-    const statusCode = error.code === 'IDEMPOTENCY_KEY_REUSED' ? 409 : 400;
-    res.status(statusCode).json(mapError(error));
+  } catch (error: any) {
+    const { status, body } = toApiError(error);
+    res.status(status).json(body);
   }
 });
 

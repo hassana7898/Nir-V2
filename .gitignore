@@ -1,0 +1,23 @@
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Environment / secrets (NEVER commit)
+.env
+.env.*
+!.env.example
+.npmrc
+
+# Build & release artifacts
+release/
+runtime/
+*.zip
+*.log
+
+# Runtime data
+data/
+backups/
+certs/
+*.pem
+*.pfx

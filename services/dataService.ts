@@ -94,7 +94,7 @@ export const sendRestRequest = async <T = any>(
     options: RequestInit = {}
 ): Promise<ApiResponse<T>> => {
     if (!navigator.onLine) {
-        return { success: false, error: { code: 'SERVER_ERROR', message: 'شما آفلاین هستید' } }; // Network equivalent
+        return { success: false, error: { code: 'OFFLINE', message: 'شما آفلاین هستید' } }; // Network equivalent
     }
 
     try {
@@ -117,7 +117,7 @@ export const sendRestRequest = async <T = any>(
 
         return data as ApiResponse<T>; // Should be the error structure
     } catch (error: any) {
-        return { success: false, error: { code: 'SERVER_ERROR', message: 'خطای شبکه' } };
+        return { success: false, error: { code: 'OFFLINE', message: 'خطای شبکه' } };
     }
 };
 
@@ -347,6 +347,10 @@ export const addInvoice = async (invoiceData: any, type: 'entry' | 'exit'): Prom
     const id = invoiceData.id || `inv_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
     
     const newInvoice = { ...invoiceData, id, type };
+    if (type === 'exit' && newInvoice.farmerId) {
+        const _farmer = getFarmers().find((f: any) => f.id === newInvoice.farmerId);
+        if (_farmer && _farmer.name) newInvoice.farmerName = _farmer.name;
+    }
     if (type === 'entry') {
         if (newInvoice.wastage === undefined) { 
              newInvoice.wastage = safeParseFloat(newInvoice.scaleWeight) - safeParseFloat(newInvoice.billWeight);
@@ -1123,7 +1127,7 @@ export const mergeFarmers = async (sourceId: string, targetId: string): Promise<
     const targetFarmer = fs.find(f => f.id === targetId);
     if (sourceFarmer && targetFarmer) {
         targetFarmer.broods = [...(targetFarmer.broods || []), ...(sourceFarmer.broods || [])];
-        targetFarmer.updatedAt = Date.now();
+        (targetFarmer as any).updatedAt = Date.now();
     }
     await saveFarmers(fs.filter(f => f.id !== sourceId));
     await deleteFarmer(sourceId);

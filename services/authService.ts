@@ -28,7 +28,7 @@ export const isPasswordSet = (): boolean => {
 };
 
 export const setPassword = async (password: string): Promise<void> => {
-    const salt = bufferToHex(crypto.getRandomValues(new Uint8Array(16)));
+    const salt = bufferToHex(crypto.getRandomValues(new Uint8Array(16)) as unknown as ArrayBuffer);
     const hash = await hashPassword(password, salt);
     localStorage.setItem(PASSWORD_SALT_KEY, salt);
     localStorage.setItem(PASSWORD_HASH_KEY, hash);

@@ -2,7 +2,7 @@ import express from 'express';
 import { sql, eq } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
-import { recordInventoryTransaction, deleteTransactionsByReference, getInventoryStockByDate } from '../services/inventoryService';
+import { recordInventoryTransaction, createReversingTransaction, getInventoryStockByDate } from '../services/inventoryService';
 import { createInvoiceInTransaction, updateInvoiceInTransaction } from '../services/invoiceService';
 import { createProductionRecordInTransaction } from '../services/productionService';
 import { requireRole } from '../middleware/auth';
@@ -108,7 +108,7 @@ router.post('/', requireRole('ADMIN', 'MANAGER', 'ACCOUNTING', 'OPERATOR'), asyn
           else if (body.action === 'update') await updateInvoiceInTransaction(tx, String(body.data?.id), body.data);
           else {
             const id = String(body.data?.id);
-            await deleteTransactionsByReference(tx, id);
+            await createReversingTransaction(tx, id);
             await tx.update(schema.invoices).set({ deletedAt: new Date(), updatedAt: new Date() }).where(eq(schema.invoices.id, id));
           }
           break;
@@ -118,7 +118,7 @@ router.post('/', requireRole('ADMIN', 'MANAGER', 'ACCOUNTING', 'OPERATOR'), asyn
           if (body.action === 'create') {
             await createProductionRecordInTransaction(tx, body.data);
           } else if (body.action === 'delete') {
-            await deleteTransactionsByReference(tx, id);
+            await createReversingTransaction(tx, id);
             await tx.update(schema.production_records).set({ deletedAt: new Date(), updatedAt: new Date() }).where(eq(schema.production_records.id, id));
             await tx.update(schema.batches).set({ deletedAt: new Date(), status: 'voided', updatedAt: new Date() }).where(eq(schema.batches.productionRecordId, id));
           } else {
@@ -130,7 +130,7 @@ router.post('/', requireRole('ADMIN', 'MANAGER', 'ACCOUNTING', 'OPERATOR'), asyn
           const item = body.data;
           if (!item?.id) throw new Error('Adjustment mutation requires id');
           if (body.action === 'delete') {
-            await deleteTransactionsByReference(tx, String(item.id));
+            await createReversingTransaction(tx, String(item.id));
             await tx.update(schema.inventory_adjustments).set({ deletedAt: new Date(), updatedAt: new Date() }).where(eq(schema.inventory_adjustments.id, String(item.id)));
             break;
           }
@@ -142,7 +142,7 @@ router.post('/', requireRole('ADMIN', 'MANAGER', 'ACCOUNTING', 'OPERATOR'), asyn
           if (!Number.isFinite(newQty)) throw new Error('موجودی جدید نامعتبر است.');
           const diff = newQty - currentQty;
           await tx.insert(schema.inventory_adjustments).values({ id: String(item.id), date, productId, newQuantity: String(newQty), reason: nullable(item.reason), createdAt: asDate(item.createdAt), updatedAt: asDate(item.updatedAt), deletedAt: null }).onConflictDoUpdate({ target: schema.inventory_adjustments.id, set: { date, productId, newQuantity: String(newQty), reason: nullable(item.reason), deletedAt: null, updatedAt: new Date() } });
-          await deleteTransactionsByReference(tx, String(item.id));
+          await createReversingTransaction(tx, String(item.id));
           if (diff !== 0) await recordInventoryTransaction(tx, { date, productId, type: 'adjustment', quantity: diff, referenceType: 'inventory_adjustment', referenceId: String(item.id), notes: nullable(item.reason) || 'تعدیل موجودی انبار' });
           break;
         }

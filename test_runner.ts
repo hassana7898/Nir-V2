@@ -8,13 +8,16 @@ import 'fake-indexeddb/auto';
 
 // Setup fake localStorage
 if (global.navigator) { Object.defineProperty(global.navigator, 'onLine', { value: true, configurable: true }); } else { (global as any).navigator = { onLine: true }; }
-global.localStorage = {
-  _store: new Map(),
-  getItem(key: string) { return this._store.get(key) || null; },
-  setItem(key: string, value: string) { this._store.set(key, value); },
-  removeItem(key: string) { this._store.delete(key); },
-  clear() { this._store.clear(); }
+const __store = new Map<string, string>();
+const __storageShim = {
+  length: 0,
+  clear() { __store.clear(); },
+  getItem(key: string) { return __store.get(key) ?? null; },
+  key(_index: number) { return null; },
+  removeItem(key: string) { __store.delete(key); },
+  setItem(key: string, value: string) { __store.set(key, value); },
 } as unknown as Storage;
+global.localStorage = __storageShim;
 
 // App Setup
 const app = express();

@@ -33,32 +33,32 @@ if (process.env.PGLITE_TEST === 'true' && !isProductionEnv) {
   };
 } else if (e2eTestRequested && !isProductionEnv) {
   console.log('[NIR DB] E2E DB Mock Enabled (non-production only)');
-  const mockUsers = [];
-  const mockQueryObj = (method, args) => {
+  const mockUsers: any[] = [];
+  const mockQueryObj = (method: string, args: any) => {
     let q = {
       from: () => q,
       where: () => q,
       limit: () => q,
-      values: (vals) => {
+      values: (vals: any) => {
         if (method === 'insert') mockUsers.push(vals);
         return q;
       },
-      then: (res, rej) => {
+      then: (res: any, rej: any) => {
         if (method === 'select') {
           return Promise.resolve(mockUsers).then(res, rej);
         }
         return Promise.resolve().then(res, rej);
       },
-      catch: (rej) => Promise.resolve().catch(rej)
+      catch: (rej: any) => Promise.resolve().catch(rej)
     };
     return q;
   };
   
   drizzleDb = {
-    select: (...args) => mockQueryObj('select', args),
-    insert: (...args) => mockQueryObj('insert', args),
-    delete: (...args) => mockQueryObj('delete', args),
-    update: (...args) => mockQueryObj('update', args)
+    select: (...args: any[]) => mockQueryObj('select', args),
+    insert: (...args: any[]) => mockQueryObj('insert', args),
+    delete: (...args: any[]) => mockQueryObj('delete', args),
+    update: (...args: any[]) => mockQueryObj('update', args)
   };
 } else if (databaseUrl) {
   try {

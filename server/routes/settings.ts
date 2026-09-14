@@ -24,7 +24,7 @@ router.put('/', async (req, res) => {
       return res.status(400).json({ error: 'Invalid settings payload.' });
     }
 
-    await db.transaction(async (tx) => {
+    await db.transaction(async (tx: any) => {
       // 1. Save settings JSON
       await tx
         .insert(settings)

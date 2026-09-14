@@ -1,219 +1,224 @@
-import invoicesRouter from "./server/routes/invoices";
 import express from "express";
-import { db } from "./server/db";
 import path from "path";
-import cors from "cors";
-import { createServer as createViteServer } from "vite";
+import fs from "fs";
+import * as dotenv from "dotenv";
+
+dotenv.config();
+
+import { db, checkDbHealth } from "./server/db";
 import { GoogleGenAI, Type } from "@google/genai";
 
+import { securityHeaders } from "./server/middleware/security";
+import { corsMiddleware } from "./server/middleware/cors";
+import { apiRateLimiter, authRateLimiter } from "./server/middleware/rateLimit";
+import { requireAuth } from "./server/middleware/auth";
+
+import authRouter from "./server/routes/auth";
+import settingsRouter from "./server/routes/settings";
+import farmersRouter from "./server/routes/farmers";
+import driversRouter from "./server/routes/drivers";
+import originsRouter from "./server/routes/origins";
+import invoicesRouter from "./server/routes/invoices";
+import inventoryRouter from "./server/routes/inventory";
+import productionRouter from "./server/routes/production";
+import formulasRouter from "./server/routes/formulas";
+import warehousesRouter from "./server/routes/warehouses";
+import usersRouter from "./server/routes/users";
+import syncRouter from "./server/routes/sync";
+import backupRouter from "./server/routes/backup";
+import uploadRouter from "./server/routes/uploads";
+
 export const app = express();
-app.use(express.json());
-app.use("/api/invoices", invoicesRouter);
-const PORT = 3000;
 
-app.use(cors());
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+// Bind host: env-driven, defaulting to loopback. Production must never expose the
+// app port directly; nginx proxies to it.
+const HOST = (process.env.HOST || "127.0.0.1").trim() || "127.0.0.1";
+
+// Nginx runs on this host and forwards the real client IP. Trusting only the loopback
+// proxy makes req.ip (used by the rate limiters) the actual client.
+app.set("trust proxy", "loopback");
+
+app.use(securityHeaders);
+app.use(corsMiddleware);
 app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-// Initialize Gemini Client
-// In development, handle missing API key slightly gracefully
-let ai: GoogleGenAI | null = null;
-try {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (apiKey) {
-    ai = new GoogleGenAI({ apiKey });
-  }
-} catch (err) {
-  console.warn("Could not initialize GoogleGenAI:", err);
-}
+const uploadsPath = path.resolve(
+  process.env.UPLOAD_DIR || process.env.NIR_UPLOADS_PATH || path.join(process.cwd(), "data", "uploads")
+);
+app.use("/uploads", express.static(uploadsPath));
 
-// API Routes
-app.get("/api/health", (req, res) => {
-  res.json({ status: "ok" });
+// ---------------------------------------------------------------- health
+app.get("/api/health", async (_req, res) => {
+  const database = await checkDbHealth();
+  const healthy = database.status === "connected";
+  res.status(healthy ? 200 : 503).json({
+    status: healthy ? "ok" : "degraded",
+    service: "nir-production",
+    database,
+    time: new Date().toISOString(),
+  });
 });
 
-app.post("/api/extract", async (req, res) => {
+// ---------------------------------------------------------------- auth
+app.use("/api/auth", authRateLimiter, authRouter);
+
+// -------------------------------------------------- authenticated business APIs
+app.use("/api/settings", apiRateLimiter, requireAuth, settingsRouter);
+app.use("/api/farmers", apiRateLimiter, requireAuth, farmersRouter);
+app.use("/api/drivers", apiRateLimiter, requireAuth, driversRouter);
+app.use("/api/origins", apiRateLimiter, requireAuth, originsRouter);
+app.use("/api/invoices", apiRateLimiter, requireAuth, invoicesRouter);
+app.use("/api/inventory", apiRateLimiter, requireAuth, inventoryRouter);
+app.use("/api/production", apiRateLimiter, requireAuth, productionRouter);
+app.use("/api/formulas", apiRateLimiter, requireAuth, formulasRouter);
+app.use("/api/warehouses", apiRateLimiter, requireAuth, warehousesRouter);
+app.use("/api/users", apiRateLimiter, requireAuth, usersRouter);
+app.use("/api/sync", apiRateLimiter, requireAuth, syncRouter);
+app.use("/api/backup", apiRateLimiter, requireAuth, backupRouter);
+app.use("/api/uploads", apiRateLimiter, requireAuth, uploadRouter);
+
+// ---------------------------------------------------------------- AI extraction
+let ai: GoogleGenAI | null = null;
+const getGeminiClient = (): GoogleGenAI | null => {
+  if (!ai && process.env.GEMINI_API_KEY) ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  return ai;
+};
+
+app.post("/api/extract", apiRateLimiter, requireAuth, async (req, res) => {
   try {
     const { base64Data, mimeType, type, knownFarmers, knownProducts, knownDrivers } = req.body;
-    
-    if (!ai) {
-      if (process.env.GEMINI_API_KEY) {
-        ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      } else {
-        return res.status(401).json({ error: "API Key (GEMINI_API_KEY) is missing." });
-      }
-    }
+    const client = getGeminiClient();
+    if (!client) return res.status(503).json({ error: "API Key (GEMINI_API_KEY) is missing." });
 
     const responseSchema = type === 'entry' ? {
-        type: Type.ARRAY,
-        items: {
-            type: Type.OBJECT,
-            properties: {
-                sellerName: { type: Type.STRING, nullable: true },
-                productName: { type: Type.STRING, nullable: true },
-                billWeight: { type: Type.NUMBER, nullable: true },
-                scaleWeight: { type: Type.NUMBER, nullable: true },
-                driverName: { type: Type.STRING, nullable: true },
-                billNumber: { type: Type.STRING, nullable: true },
-                origin: { type: Type.STRING, nullable: true },
-                transportCost: { type: Type.NUMBER, nullable: true },
-                driverPhone: { type: Type.STRING, nullable: true },
-                driverIBAN: { type: Type.STRING, nullable: true }
-            }
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          sellerName: { type: Type.STRING, nullable: true },
+          productName: { type: Type.STRING, nullable: true },
+          billWeight: { type: Type.NUMBER, nullable: true },
+          scaleWeight: { type: Type.NUMBER, nullable: true },
+          driverName: { type: Type.STRING, nullable: true },
+          billNumber: { type: Type.STRING, nullable: true },
+          origin: { type: Type.STRING, nullable: true },
+          transportCost: { type: Type.NUMBER, nullable: true },
+          driverPhone: { type: Type.STRING, nullable: true },
+          driverIBAN: { type: Type.STRING, nullable: true }
         }
+      }
     } : {
-        type: Type.ARRAY,
-        items: {
-            type: Type.OBJECT,
-            properties: {
-                farmerName: { type: Type.STRING, nullable: true },
-                productName: { type: Type.STRING, nullable: true },
-                weight: { type: Type.NUMBER, nullable: true },
-                driverName: { type: Type.STRING, nullable: true },
-                invoiceNumber: { type: Type.STRING, nullable: true }
-            }
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          farmerName: { type: Type.STRING, nullable: true },
+          productName: { type: Type.STRING, nullable: true },
+          weight: { type: Type.NUMBER, nullable: true },
+          driverName: { type: Type.STRING, nullable: true },
+          invoiceNumber: { type: Type.STRING, nullable: true }
         }
+      }
     };
 
     const kf = knownFarmers && knownFarmers.length > 0 ? `\nKnown Farmers/Sellers: ${knownFarmers.join(", ")}` : "";
     const kp = knownProducts && knownProducts.length > 0 ? `\nKnown Products: ${knownProducts.join(", ")}` : "";
     const kd = knownDrivers && knownDrivers.length > 0 ? `\nKnown Drivers: ${knownDrivers.join(", ")}` : "";
-    
     const contextStr = `${kf}${kp}${kd}`;
 
     const promptText = type === 'entry'
-        ? `Task: Extract Persian raw materials entry remittance data from this image/pdf (Right-to-Left).
+      ? `Task: Extract Persian raw materials entry remittance data from this image/pdf (Right-to-Left).
 Return a JSON Array of objects.
 Columns mapped to JSON keys:
 - Seller Name (فروشنده) -> sellerName
-- Product (نوع محصول) -> productName
+- Product (نام کالا) -> productName
 - Bill Weight (وزن بارنامه) -> billWeight (number)
 - Scale Weight (وزن باسکول) -> scaleWeight (number)
 - Factory (کارخانه) -> factory
 - Driver (راننده) -> driverName
-- Bill Number (شماره بارنامه/حواله) -> billNumber
+- Bill Number (شماره بارنامه) -> billNumber
 - Origin (مبدا) -> origin
 - Transport Cost (کرایه) -> transportCost (number)
 - Driver Phone (تلفن) -> driverPhone
-- Driver IBAN (شبا/کارت) -> driverIBAN
+- Driver IBAN (شبا) -> driverIBAN
 
 CRITICAL RULES FOR EXTRACTION:
 1. SEPARATION OF SELLER AND PRODUCT: The image often physically merges Seller name and Product name. You MUST separate them.
-2. Example of bad output: sellerName="احمدی ذرت", productName=null
-3. Example of good output: sellerName="احمدی", productName="ذرت"
-4. Look for commodity words: ذرت, سویا, دان, گندم, جو, مرغ, کنجاله, پودر, روغن, مکمل, سبوس, پریمال, ویتامینه, متیونین, لیزین, کربنات, صدف, نمک, جوجه, پلت, کراش. 
-If these words (or similar product names) appear next to a person's name, you MUST extract them into the 'productName' field and remove them from 'sellerName'.
+2. Example of bad output: sellerName="حسین ذرت", productName=null
+3. Example of good output: sellerName="حسین", productName="ذرت"
 
 CONTEXT (Known Values to Help You):${contextStr}`
-        : `Task: Extract Persian exit remittance data from this image/pdf (Right-to-Left).
+      : `Task: Extract Persian exit remittance data from this image/pdf (Right-to-Left).
 Return a JSON Array of objects.
 Columns mapped to JSON keys:
-- Farmer Name (مرغدار/خریدار) -> farmerName
-- Product (نوع محصول/کالا) -> productName
-- Weight (وزن/مقدار) -> weight (number)
+- Farmer Name (مرغدار) -> farmerName
+- Product (نام کالا) -> productName
+- Weight (وزن) -> weight (number)
 - Driver (راننده) -> driverName
-- Invoice No (شماره حواله) -> invoiceNumber
+- Invoice No (شماره فاکتور) -> invoiceNumber
 
 CRITICAL RULES FOR EXTRACTION:
 1. SEPARATION OF FARMER AND PRODUCT: The image often physically merges Farmer name and Product name. You MUST separate them.
-2. Example of bad output: farmerName="علی مرغ زنده", productName=null
-3. Example of good output: farmerName="علی", productName="مرغ زنده"
-4. Identify and extract agricultural commodities to the 'productName' field: ذرت, سویا, دان, گندم, جو, مرغ, کنجاله, پودر, روغن, مکمل, سبوس, رول, پلت, پیش دان, میان دان, پس دان, گوشتی. 
-Any time you see these or similar product/commodity words, they belong in 'productName', NOT 'farmerName'.
 
 CONTEXT (Known Values to Help You):${contextStr}`;
 
-    const response = await ai.models.generateContent({
-        model: 'gemini-1.5-pro',
-        contents: {
-            parts: [
-                { inlineData: { mimeType: mimeType, data: base64Data } },
-                { text: promptText }
-            ]
-        },
-        config: {
-            responseMimeType: "application/json",
-            responseSchema: responseSchema
-        }
+    const response = await client.models.generateContent({
+      model: 'gemini-1.5-pro',
+      contents: { parts: [{ inlineData: { mimeType, data: base64Data } }, { text: promptText }] },
+      config: { responseMimeType: "application/json", responseSchema }
     });
 
-    if (response.text) {
-      let rawData = JSON.parse(response.text.trim());
-      
-      if (Array.isArray(rawData)) {
-         const productKeywords = ['ذرت', 'سویا', 'پیش دان', 'میان دان', 'پس دان', 'پس دان یک', 'پس دان دو', 'دان', 'گندم', 'جو', 'مرغ', 'کنجاله', 'پودر', 'روغن', 'مکمل', 'سبوس', 'رول', 'پلت', 'کراش', 'پریمال', 'متیونین', 'لیزین', 'کربنات', 'صدف', 'نمک', 'جوجه', 'گوشتی', 'زنده', 'استارتر', 'ویتامین', 'کلسیم', 'فسفر', 'دی کلسیم', 'کنسانتره', 'رشد', 'آغازین', 'پایانی'];
-         const kpArray = (knownProducts || []).map((p: string) => p.trim());
-         
-         const allProducts = [...new Set([...productKeywords, ...kpArray])].sort((a, b) => b.length - a.length);
-         
-         rawData = rawData.map(item => {
-             let nameObj = type === 'entry' ? item.sellerName : item.farmerName;
-             let prodObj = item.productName;
-             
-             if (nameObj && typeof nameObj === 'string' && (!prodObj || prodObj.toString().trim() === '')) {
-                 let name = nameObj.trim();
-                 let productNameRaw = '';
-                 
-                 for (let p of allProducts) {
-                     if (p && name.includes(p)) {
-                         let regex = new RegExp(`(?:^|\\s)(${p})(?:\\s|$)`);
-                         let match = name.match(regex);
-                         
-                         if (match) {
-                             productNameRaw = match[1];
-                             name = name.replace(regex, ' ').trim();
-                             break;
-                         } else if (name.endsWith(p)) {
-                             productNameRaw = p;
-                             name = name.slice(0, name.length - p.length).trim();
-                             break;
-                         }
-                     }
-                 }
-                 
-                 if (productNameRaw) {
-                     if (type === 'entry') item.sellerName = name;
-                     else item.farmerName = name;
-                     
-                     item.productName = productNameRaw;
-                 }
-             }
-             return item;
-         });
-      }
-      
-      res.json(rawData);
-    } else {
-      res.status(500).json({ error: "Empty response from Gemini." });
-    }
+    if (!response.text) return res.status(500).json({ error: "Empty response from Gemini." });
+    res.json(JSON.parse(response.text.trim()));
   } catch (error: any) {
     console.error("Gemini Extraction Error:", error);
     res.status(500).json({ error: error.message || "Unknown error during AI extraction." });
   }
 });
 
+// ---------------------------------------------------------------- API 404
+app.all(/^\/api\/.*/, (req, res) => {
+  res.status(404).json({ success: false, error: { code: 'SERVER_ERROR', message: 'API endpoint not found', path: req.originalUrl } });
+});
+
+// ---------------------------------------------------------------- error handler
+const errorHandler = (err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error('[NIR Server Error]', err);
+  const status = err.status || err.statusCode || 500;
+  res.status(status).json({
+    success: false,
+    error: { code: 'SERVER_ERROR', message: err?.message || 'خطای داخلی سرور.' },
+    ...(process.env.NODE_ENV !== 'production' ? { stack: err?.stack } : {})
+  });
+};
+
+// ---------------------------------------------------------------- bootstrap
 async function startServer() {
   if ((db as any).migrateDb) {
     await (db as any).migrateDb();
-    console.log("Migrations applied to PGLite DB from server.ts.");
-  }
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*all', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+    console.log("[NIR] PGLite test database migrated (non-production only).");
   }
 
-  const HOST = process.env.HOST || "0.0.0.0";
-  app.listen(PORT, HOST, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+  if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
+    const vite = await createViteServer({ server: { middlewareMode: true }, appType: "spa" });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.resolve(process.env.NIR_DIST_PATH || path.join(process.cwd(), 'dist'));
+    const assetsPath = path.join(distPath, 'assets');
+    app.use('/assets', express.static(assetsPath, { fallthrough: false, immutable: true, maxAge: '1y' }));
+    app.use(express.static(distPath, { index: 'index.html', fallthrough: true }));
+    app.get(/^(?!\/api(?:\/|$)|\/uploads(?:\/|$)|\/assets(?:\/|$)).*$/, (_req, res) => {
+      res.sendFile('index.html', { root: distPath });
+    });
+    app.use('/assets', (_req, res) => res.status(404).send('Asset not found'));
+  }
+
+  app.use(errorHandler);
+
+  app.listen(PORT, HOST, () => console.log(`[NIR] Server running on http://${HOST}:${PORT}`));
 }
 
 startServer();

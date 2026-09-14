@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { db } from '../db';
 import { production_records, batches, formulas, formula_items, products } from '../db/schema';
-import { recordInventoryTransaction, deleteTransactionsByReferenceId, getInventoryStockByDate } from './inventoryService';
+import { recordInventoryTransaction, createReversingTransaction, getInventoryStockByDate } from './inventoryService';
 
 export interface ProductionInput {
   id?: string;
@@ -114,6 +114,6 @@ export const deleteProductionRecordWithTransaction = async (id: string): Promise
   await db.transaction(async (tx: any) => {
     await tx.update(production_records).set({ deletedAt: new Date(), updatedAt: new Date() }).where(eq(production_records.id, id));
     await tx.update(batches).set({ deletedAt: new Date(), status: 'voided', updatedAt: new Date() }).where(eq(batches.productionRecordId, id));
-    await deleteTransactionsByReferenceId(tx, id);
+    await createReversingTransaction(tx, id);
   });
 };

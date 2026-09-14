@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useSettings } from '../contexts/SettingsContext';
-import { Settings, Product, Farmer } from '../types';
+import { Settings, Product, Farmer, ProductType } from '../types';
 import { showToast, fileToBase64 } from '../utils/helpers';
 import * as dataService from '../services/dataService';
 import * as authService from '../services/authService';
@@ -329,9 +329,9 @@ const SettingsPage: React.FC = () => {
     };
 
 
-    const handleExport = () => {
+    const handleExport = async () => {
         try {
-            const jsonData = dataService.exportData();
+            const jsonData = await dataService.exportData();
             const blob = new Blob([jsonData], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
@@ -362,9 +362,9 @@ const SettingsPage: React.FC = () => {
                     cancelButtonColor: '#3085d6',
                     confirmButtonText: 'بله، جایگزین کن!',
                     cancelButtonText: 'انصراف'
-                }).then((result) => {
+                }).then(async (result) => {
                     if (result.isConfirmed) {
-                        dataService.importData(jsonData);
+                        try { await dataService.importData(jsonData); } catch (_err: any) { Swal.fire('خطا', _err?.message || 'بازیابی ناموفق بود.', 'error'); return; }
                         Swal.fire({
                             title: 'موفق',
                             text: 'اطلاعات با موفقیت بازیابی شد. برنامه مجددا بارگذاری می‌شود...',

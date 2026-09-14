@@ -53,6 +53,7 @@ export interface Farmer {
     broods: Brood[];
     isHidden?: boolean;
     isDeleted?: boolean;
+    updatedAt?: number;
 }
 
 

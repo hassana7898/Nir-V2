@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "factory-remittance-management",
     "private":  true,
     "version":  "0.0.0",
@@ -60,5 +60,8 @@
                             "tsx":  "^4.22.3",
                             "typescript":  "^5.2.2",
                             "vite":  "^5.1.6"
-                        }
+                        },
+    "optionalDependencies":  {
+                                 "@rollup/rollup-win32-x64-msvc":  "^4.63.2"
+                             }
 }

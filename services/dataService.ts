@@ -786,8 +786,12 @@ export interface ImportSummary {
     verifiedCounts?: Record<string, number>;
     skippedTables?: string[];
     totalRows?: number;
+    skippedKeys?: string[];
+    warnings?: string[];
     /** true when only the local offline cache could be restored (server unreachable). */
     localOnly?: boolean;
+    /** true when a pre-V2 (legacy) backup was migrated server-side. */
+    legacy?: boolean;
 }
 
 /**
@@ -829,6 +833,48 @@ export const importData = async (jsonData: string): Promise<ImportSummary> => {
     }
 
     const isServerSnapshot = parsed && typeof parsed === 'object' && parsed.tables && typeof parsed.tables === 'object';
+
+    // Pre-V2 backups are a flat `poultryApp*` key -> value map. They MUST go through the
+    // server: writing them to the local cache (the old behaviour) is why a restore once
+    // "saved" but the application still had no data.
+    const LEGACY_KEYS = ['poultryAppSettings', 'poultryAppProducts', 'poultryAppFarmers', 'poultryAppDrivers', 'poultryAppOrigins', 'poultryAppFormulas', 'poultryAppInvoices', 'poultryAppAdjustments', 'poultryAppProduction', 'poultryAppLogs', 'origins'];
+    const isLegacySnapshot = !isServerSnapshot && parsed && typeof parsed === 'object' && LEGACY_KEYS.some((k) => (parsed as any)[k] !== undefined);
+
+    if (isLegacySnapshot) {
+        // Purely client-side preferences that live in localStorage (print ordering, language)
+        // are restored locally; everything else is migrated server-side in one transaction.
+        for (const key of Object.keys(parsed)) {
+            if (!key.startsWith('sortOrder_') && key !== 'i18nextLng') continue;
+            try {
+                const value = parsed[key];
+                window.localStorage.setItem(key, typeof value === 'string' ? value : JSON.stringify(value));
+            } catch { /* best-effort: quota / private mode */ }
+        }
+
+        const res = await fetch('/api/backup/restore-legacy', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: jsonData,
+        });
+        const payload = await res.json().catch(() => ({} as any));
+        if (!res.ok) {
+            throw new Error(payload?.error || `بازیابی پشتیبان قدیمی ناموفق بود (HTTP ${res.status}).`);
+        }
+
+        invalidateInventoryCache();
+        try { await hydrateFromServer(); } catch { /* local refresh is best-effort */ }
+
+        return {
+            restoredTables: payload.restoredTables || {},
+            verifiedCounts: payload.verifiedCounts,
+            skippedTables: payload.skippedKeys,
+            skippedKeys: payload.skippedKeys,
+            warnings: payload.warnings,
+            totalRows: payload.totalRows,
+            legacy: true,
+        };
+    }
 
     if (isServerSnapshot) {
         const res = await fetch('/api/backup/restore', {

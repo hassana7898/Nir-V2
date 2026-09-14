@@ -1,7 +1,7 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
-import { backupDatabase, exportSnapshot, restoreDatabase } from '../services/backup';
+import { backupDatabase, exportSnapshot, restoreDatabase, restoreLegacySnapshot, isLegacySnapshot } from '../services/backup';
 import { requireRole } from '../middleware/auth';
 
 const router = express.Router();
@@ -67,6 +67,28 @@ router.post('/restore', requireRole('ADMIN'), async (req, res) => {
   } catch (error: any) {
     console.error('Restore error:', error);
     res.status(500).json({ error: error.message || 'Restore failed.' });
+  }
+});
+
+// POST /api/backup/restore-legacy - Restore a pre-V2 (flat poultryApp* map) backup
+router.post('/restore-legacy', requireRole('ADMIN'), async (req, res) => {
+  try {
+    const payload = req.body;
+    if (!isLegacySnapshot(payload)) {
+      return res.status(400).json({ error: 'Fingerprint does not match a legacy NIR backup.' });
+    }
+    const result = await restoreLegacySnapshot(payload);
+    res.json({
+      success: true,
+      restoredTables: result.restoredTables,
+      verifiedCounts: result.restoredTables,
+      skippedKeys: result.skippedKeys,
+      warnings: result.warnings,
+      totalRows: result.totalRows,
+    });
+  } catch (error: any) {
+    console.error('Legacy restore error:', error);
+    res.status(500).json({ error: error.message || 'Legacy restore failed.' });
   }
 });
 

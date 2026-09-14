@@ -26,6 +26,7 @@ import warehousesRouter from "./server/routes/warehouses";
 import usersRouter from "./server/routes/users";
 import syncRouter from "./server/routes/sync";
 import backupRouter from "./server/routes/backup";
+import { restoreLegacySnapshot } from "./server/services/legacyImport";
 import uploadRouter from "./server/routes/uploads";
 
 export const app = express();
@@ -255,4 +256,29 @@ async function startServer() {
   app.listen(PORT, HOST, () => console.log(`[NIR] Server running on http://${HOST}:${PORT}`));
 }
 
-startServer();
+// -----------------------------------------------------------------------------
+// Maintenance CLI (does NOT start the HTTP listener):
+//   node server.cjs --restore-legacy <file.json>
+// Restores a pre-V2 backup (the flat poultryApp* key -> value map) into PostgreSQL
+// using the exact same transactional importer as POST /api/backup/restore-legacy.
+// Idempotent: safe to run repeatedly.
+// -----------------------------------------------------------------------------
+if (process.argv[2] === "--restore-legacy") {
+  (async () => {
+    const file = process.argv[3];
+    if (!file || !fs.existsSync(file)) {
+      console.error("[NIR] usage: server.cjs --restore-legacy <file.json>");
+      process.exit(2);
+    }
+    const payload = JSON.parse(fs.readFileSync(file, "utf8"));
+    const report = await restoreLegacySnapshot(payload);
+    console.log("[NIR] legacy restore report:");
+    console.log(JSON.stringify(report, null, 2));
+    process.exit(0);
+  })().catch((err) => {
+    console.error("[NIR] legacy restore failed:", err);
+    process.exit(1);
+  });
+} else {
+  startServer();
+}

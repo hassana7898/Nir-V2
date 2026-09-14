@@ -5,6 +5,10 @@ import { getTableColumns } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 
+// Pre-V2 (flat `poultryApp*` key -> value) backup importer.
+export { restoreLegacySnapshot, isLegacySnapshot } from './legacyImport';
+export type { LegacyRestoreReport } from './legacyImport';
+
 // Resolve PostgreSQL client tools (pg_dump/pg_restore). Prefers an explicit
 // PG_BIN, then a standard Windows install, then the NIR portable PostgreSQL.
 const resolvePgBin = (): string | null => {

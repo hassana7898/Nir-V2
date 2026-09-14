@@ -222,9 +222,29 @@ async function startServer() {
   } else {
     const distPath = path.resolve(process.env.NIR_DIST_PATH || path.join(process.cwd(), 'dist'));
     const assetsPath = path.join(distPath, 'assets');
-    app.use('/assets', express.static(assetsPath, { fallthrough: false, immutable: true, maxAge: '1y' }));
-    app.use(express.static(distPath, { index: 'index.html', fallthrough: true }));
+
+    // The SPA shell must NEVER be cached. A cached index.html keeps pointing at hashed
+    // assets from the previous release, and once a deploy replaces them those requests
+    // 404 and the tab renders blank. `express.static` computes its own ETag, so it has to
+    // be disabled per static mount (app.set('etag', false) does not reach it).
+    const noStoreShell = (res: express.Response) => {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    };
+
+    // Hashed asset filenames are content-addressed: cache hard, never revalidate.
+    app.use('/assets', express.static(assetsPath, { fallthrough: false, immutable: true, maxAge: '1y', etag: false }));
+    app.use(express.static(distPath, {
+      index: 'index.html',
+      fallthrough: true,
+      etag: false,
+      // no Last-Modified either: without any validator the shell can never answer 304.
+      lastModified: false,
+      setHeaders: (res, filePath) => { if (filePath.endsWith('index.html')) noStoreShell(res); },
+    }));
     app.get(/^(?!\/api(?:\/|$)|\/uploads(?:\/|$)|\/assets(?:\/|$)).*$/, (_req, res) => {
+      noStoreShell(res);
       res.sendFile('index.html', { root: distPath });
     });
     app.use('/assets', (_req, res) => res.status(404).send('Asset not found'));

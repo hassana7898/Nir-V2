@@ -809,8 +809,8 @@ export const exportData = async (): Promise<string> => {
 
     // Fallback: client-side offline cache snapshot
     const db = await initDB();
-    const keys = await db.getAllKeys('store');
-    const values = await db.getAll('store');
+    const keys = await db.getAllKeys('cache');
+    const values = await db.getAll('cache');
     const snapshot: Record<string, any> = {};
     keys.forEach((key, i) => { snapshot[key as string] = values[i]; });
     return JSON.stringify(snapshot, null, 2);
@@ -860,7 +860,7 @@ export const importData = async (jsonData: string): Promise<ImportSummary> => {
     for (const key in parsed) {
         if (ignoredKeys.has(key)) continue;
         memoryCache[key] = parsed[key];
-        await db.put('store', parsed[key], key);
+        await db.put('cache', parsed[key], key);
         restored++;
     }
     if (restored === 0) {

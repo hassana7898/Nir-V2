@@ -36,6 +36,20 @@ let dbPromise: Promise<IDBPDatabase> | null = null;
 export const initDB = () => {
   if (!dbPromise) {
     dbPromise = openDB(DB_NAME, DB_VERSION, {
+      // A version upgrade is blocked while another tab still holds an older connection.
+      // Log it, and let the OLD tab yield (see `blocking`) so upgrades complete instead of
+      // hanging forever with a half-migrated schema.
+      blocked() {
+        console.warn('[NIR] IndexedDB upgrade is blocked by another open tab.');
+      },
+      blocking() {
+        console.warn('[NIR] This tab holds an old IndexedDB connection; closing it so the upgrade can proceed.');
+        dbPromise?.then((db) => db.close()).catch(() => { /* ignore */ });
+        dbPromise = null;
+      },
+      terminated() {
+        dbPromise = null;
+      },
       upgrade(db) {
         if (!db.objectStoreNames.contains('cache')) {
           db.createObjectStore('cache'); // key is entity type (e.g., 'invoices', 'products')

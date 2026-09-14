@@ -2,7 +2,7 @@ import { eq, sql } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { db } from '../db';
 import { invoices, inventory_transactions, products, farmers } from '../db/schema';
-import { getInventoryStockByDate, recordInventoryTransaction, createReversingTransaction } from './inventoryService';
+import { getInventoryStockByDate, recordInventoryTransaction, createReversingTransaction, recalculateLedgerBalances, recalculateProductStock } from './inventoryService';
 
 export interface InvoiceInput {
   id?: string;
@@ -229,11 +229,20 @@ export const deleteInvoiceInTransaction = async (tx: any, id: string): Promise<v
 export const bulkMoveInvoicesWithTransaction = async (ids: string[], targetDate: string): Promise<number> => {
   return db.transaction(async (tx: any) => {
     let count = 0;
+    const touchedProducts = new Set<string>();
     for (const id of ids) {
       await tx.update(invoices).set({ date: targetDate, updatedAt: new Date() }).where(eq(invoices.id, id));
+      const affected = await tx
+        .select({ productId: inventory_transactions.productId })
+        .from(inventory_transactions)
+        .where(eq(inventory_transactions.referenceId, id));
+      affected.forEach((r: any) => r.productId && touchedProducts.add(String(r.productId)));
       await tx.update(inventory_transactions).set({ date: targetDate, updatedAt: new Date() }).where(eq(inventory_transactions.referenceId, id));
       count++;
     }
+    // Re-dating ledger rows changes their ordering, so the running snapshots move too.
+    await recalculateLedgerBalances(tx, [...touchedProducts]);
+    for (const pid of touchedProducts) await recalculateProductStock(tx, pid);
     return count;
   });
 };

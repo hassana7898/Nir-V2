@@ -43,6 +43,7 @@ export const recordInventoryTransaction = async (tx: any, params: RecordTransact
   if (!params.productId) throw new Error('محصول برای تراکنش انبار الزامی است.');
 
   const transactionId = randomUUID();
+  const now = new Date();
   await tx.insert(inventory_transactions).values({
     id: transactionId,
     date: params.date,
@@ -54,12 +55,40 @@ export const recordInventoryTransaction = async (tx: any, params: RecordTransact
     reversalOf: params.reversalOf || null,
     batchId: params.batchId || null,
     notes: params.notes || null,
-    createdAt: new Date(),
-    updatedAt: new Date(),
+    createdAt: now,
+    updatedAt: now,
   });
 
+  await recalculateLedgerBalances(tx, [params.productId]);
   await recalculateProductStock(tx, params.productId);
   return transactionId;
+};
+
+/**
+ * Recompute the `balance_after` running snapshot for one or more product ledgers.
+ *
+ * `balance_after` is a pure function of the ledger: the running SUM(quantity) partitioned by
+ * product and ordered deterministically by (date, created_at, id). Recomputing the whole
+ * affected ledger (rather than only the new row) keeps every later snapshot correct when a
+ * row is inserted or re-dated out of order. Must run inside the caller's transaction so the
+ * write and the balances commit atomically.
+ */
+export const recalculateLedgerBalances = async (tx: any, productIds?: string[]): Promise<void> => {
+  if (productIds && productIds.length === 0) return;
+  const filter = productIds && productIds.length
+    ? sql`WHERE product_id IN (${sql.join(productIds.map((id) => sql`${id}`), sql`, `)})`
+    : sql``;
+  await tx.execute(sql`
+    UPDATE inventory_transactions AS t
+    SET balance_after = s.runbal
+    FROM (
+      SELECT id,
+             SUM(quantity) OVER (PARTITION BY product_id ORDER BY date, created_at, id ROWS UNBOUNDED PRECEDING) AS runbal
+      FROM inventory_transactions
+      ${filter}
+    ) AS s
+    WHERE t.id = s.id
+  `);
 };
 
 export const createReversingTransaction = async (tx: any, referenceId: string): Promise<void> => {

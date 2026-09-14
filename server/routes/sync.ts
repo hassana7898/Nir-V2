@@ -61,7 +61,7 @@ const applySimpleMutation = async (tx: any, entityType: string, action: Mutation
 
 router.get('/state', async (_req, res) => {
   try {
-    const [settings, farmers, drivers, origins, invoices, formulas, production, adjustments] = await Promise.all([
+    const [settings, farmers, drivers, origins, invoices, formulas, production, adjustments, logs] = await Promise.all([
       db.select().from(schema.settings),
       db.select().from(schema.farmers),
       db.select().from(schema.drivers),
@@ -70,6 +70,7 @@ router.get('/state', async (_req, res) => {
       db.select().from(schema.formulas),
       db.select().from(schema.production_records),
       db.select().from(schema.inventory_adjustments),
+      db.select().from(schema.logs),
     ]);
     const formulaRows = await Promise.all(formulas.filter((f: any) => !f.deletedAt).map(async (f: any) => ({
       ...f,
@@ -84,6 +85,10 @@ router.get('/state', async (_req, res) => {
       formulas: formulaRows,
       production: production.filter((x: any) => !x.deletedAt),
       adjustments: adjustments.filter((x: any) => !x.deletedAt),
+      logs: logs
+        .slice()
+        .sort((a: any, b: any) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+        .slice(0, 1000),
       serverTime: new Date().toISOString(),
     });
   } catch (error) {

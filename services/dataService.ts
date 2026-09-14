@@ -1386,20 +1386,123 @@ export const deleteInvoiceOnServer = async (id: string) => {
 };
 
 
+const coerceMs = (v: any): number => {
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    const t = Date.parse(String(v ?? ''));
+    return Number.isFinite(t) ? t : 0;
+};
+
+const coerceNum = (v: any): number => {
+    const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''));
+    return Number.isFinite(n) ? n : 0;
+};
+
+/**
+ * Map an authoritative server invoice row onto the client Remittance shape.
+ *
+ * IMPORTANT: every screen distinguishes entry from exit with the expression
+ * `'sellerName' in invoice`. Server rows always carry a `sellerName` key (null for
+ * exits), so an exit that keeps the key is mis-rendered as an entry. We therefore
+ * DELETE `sellerName` from exit rows here.
+ */
+const mapServerInvoice = (r: any): Remittance => {
+    const isEntry = r?.type === 'entry' || (r?.type == null && r?.sellerName != null);
+    if (isEntry) {
+        return {
+            ...r,
+            sellerName: r.sellerName ?? '',
+            billWeight: coerceNum(r.billWeight),
+            scaleWeight: coerceNum(r.scaleWeight),
+            wastage: coerceNum(r.wastage),
+            transportCost: coerceNum(r.transportCost),
+            createdAt: coerceMs(r.createdAt),
+        } as unknown as Entry;
+    }
+    const exit: any = {
+        ...r,
+        weight: coerceNum(r.weight),
+        createdAt: coerceMs(r.createdAt),
+    };
+    delete exit.sellerName; // <- keeps `'sellerName' in inv` === false for exits
+    return exit as Exit;
+};
+
+/**
+ * Hydrate the entire local cache from the authoritative server snapshot.
+ *
+ * This is the fix for the "UI is empty after a cache clear" outage: previously the app
+ * only ever pulled invoices, and only as a side effect of a sync/import, so a freshly
+ * cleared browser showed nothing. Every screen reads synchronously from the local cache,
+ * so we must prime every dataset here before any page renders.
+ */
 export const hydrateFromServer = async (): Promise<boolean> => {
+    const write = async (key: string, value: any): Promise<void> => {
+        memoryCache[key] = value;
+        const db = await initDB();
+        await db.put('cache', value, key);
+    };
+
     try {
-        const apiRes = await sendRestRequest('/api/invoices');
-        if (apiRes && apiRes.success !== false) { 
-            let fetchedInvoices = apiRes.data || (Array.isArray(apiRes) ? apiRes : (apiRes as any).invoices);
-            if (!Array.isArray(fetchedInvoices)) {
-                console.error("Hydration failed: Expected array of invoices, got something else.");
-                return false;
+        const res = await fetch('/api/sync/state', { credentials: 'include', cache: 'no-store' });
+        if (res.ok) {
+            const s = await res.json();
+            if (s && typeof s === 'object') {
+                if (s.settings && typeof s.settings === 'object') {
+                    await write(SETTINGS_KEY, { ...DEFAULT_SETTINGS, ...s.settings });
+                }
+                if (Array.isArray(s.invoices)) {
+                    await write(INVOICES_KEY, s.invoices.map(mapServerInvoice));
+                }
+                if (Array.isArray(s.farmers)) {
+                    await write(FARMERS_KEY, s.farmers.map((f: any) => ({
+                        ...f,
+                        broods: Array.isArray(f.broods) ? f.broods : [],
+                        updatedAt: coerceMs(f.updatedAt),
+                    })));
+                }
+                if (Array.isArray(s.drivers)) {
+                    await write(DRIVERS_KEY, s.drivers.map((d: any) => (typeof d === 'string' ? d : d?.name)).filter(Boolean));
+                }
+                if (Array.isArray(s.origins)) {
+                    await write(ORIGINS_KEY, s.origins.map((o: any) => (typeof o === 'string' ? o : o?.name)).filter(Boolean));
+                }
+                if (Array.isArray(s.formulas)) {
+                    await write(FORMULAS_KEY, s.formulas.map((f: any) => ({
+                        id: f.id,
+                        finishedGoodId: f.finishedGoodId,
+                        items: (Array.isArray(f.items) ? f.items : []).map((i: any) => ({ productId: i.productId, quantity: coerceNum(i.quantity) })),
+                    })));
+                }
+                if (Array.isArray(s.production)) {
+                    await write(PRODUCTION_KEY, s.production.map((p: any) => ({ ...p, quantityProduced: coerceNum(p.quantityProduced), createdAt: coerceMs(p.createdAt) })));
+                }
+                if (Array.isArray(s.adjustments)) {
+                    await write(ADJUSTMENTS_KEY, s.adjustments.map((a: any) => ({ ...a, newQuantity: coerceNum(a.newQuantity), createdAt: coerceMs(a.createdAt) })));
+                }
+                if (Array.isArray(s.logs)) {
+                    await write(LOGS_KEY, s.logs.map((l: any) => ({ ...l, timestamp: coerceMs(l.timestamp) })));
+                }
+                invalidateInventoryCache();
+                return true;
             }
-            await saveAllInvoices(fetchedInvoices);
-            return true;
         }
     } catch (e) {
-        console.error('Hydration failed DEBUG:', e);
+        console.error('Full hydration from /api/sync/state failed:', e);
+    }
+
+    // Fallback: the old invoices-only path (kept so an older server build still hydrates something).
+    try {
+        const apiRes: any = await sendRestRequest('/api/invoices');
+        const candidates = [apiRes?.data, apiRes?.invoices, apiRes?.data?.data, Array.isArray(apiRes) ? apiRes : null];
+        const invoices = candidates.find((c) => Array.isArray(c));
+        if (Array.isArray(invoices)) {
+            await saveAllInvoices(invoices.map(mapServerInvoice));
+            invalidateInventoryCache();
+            return true;
+        }
+        console.error('Hydration failed: expected an array of invoices.');
+    } catch (e) {
+        console.error('Hydration fallback failed:', e);
     }
     return false;
 };

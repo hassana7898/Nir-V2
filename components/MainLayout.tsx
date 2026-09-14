@@ -2,6 +2,7 @@
 import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import Sidebar from './Sidebar';
+import SyncStatusIndicator from './SyncStatusIndicator';
 import EntryPage from '../pages/EntryPage';
 import ExitPage from '../pages/ExitPage';
 import ReportsPage from '../pages/ReportsPage';
@@ -19,6 +20,7 @@ const MainLayout: React.FC = () => {
     return (
         <div className="flex h-screen transition-opacity duration-500 opacity-100">
             <Sidebar />
+            <SyncStatusIndicator />
             <main className="flex-1 p-6 overflow-y-auto bg-slate-100">
                 <Routes>
                     <Route path="/" element={<Navigate to="/dashboard" replace />} />

@@ -12,6 +12,8 @@ export interface RecordTransactionParams {
   referenceId?: string;
   batchId?: string;
   notes?: string;
+  /** Immutable-ledger link: the transaction id this entry reverses. */
+  reversalOf?: string | null;
 }
 
 const calculateStock = async (tx: any, productId: string, untilDateStr?: string): Promise<number> => {
@@ -49,6 +51,7 @@ export const recordInventoryTransaction = async (tx: any, params: RecordTransact
     quantity: String(params.quantity),
     referenceType: params.referenceType || 'manual',
     referenceId: params.referenceId || null,
+    reversalOf: params.reversalOf || null,
     batchId: params.batchId || null,
     notes: params.notes || null,
     createdAt: new Date(),
@@ -61,10 +64,14 @@ export const recordInventoryTransaction = async (tx: any, params: RecordTransact
 
 export const createReversingTransaction = async (tx: any, referenceId: string): Promise<void> => {
   const affected = await tx.select().from(inventory_transactions).where(eq(inventory_transactions.referenceId, referenceId));
+  // Entries that already carry a reversal must never be reversed twice (idempotent deletes).
+  const alreadyReversed = new Set(affected.map((r: any) => r.reversalOf).filter(Boolean));
+
   for (const trans of affected) {
     // Avoid double reversing
     if (trans.type === 'reversal') continue;
-    
+    if (alreadyReversed.has(trans.id)) continue;
+
     await recordInventoryTransaction(tx, {
       date: trans.date, // Preserve original date for correct historical calculation
       productId: trans.productId,
@@ -72,6 +79,7 @@ export const createReversingTransaction = async (tx: any, referenceId: string): 
       quantity: -Number(trans.quantity),
       referenceType: trans.referenceType as any,
       referenceId: referenceId, // keep reference to original entity
+      reversalOf: trans.id, // immutable-ledger link to the reversed entry
       notes: `Reversal of transaction ${trans.id}`
     });
   }

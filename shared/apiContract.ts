@@ -9,7 +9,7 @@ export type ApiErrorCode =
   | 'INSUFFICIENT_STOCK'
   | 'UNKNOWN_PRODUCT'
   | 'UNKNOWN_FARMER'
-  | 'IDEMPOTENCY_KEY_REUSED'
+  | 'IDEMPOTENCY_KEY_REUSE'
   | 'OFFLINE';
 
 export type ApiError = {
@@ -50,7 +50,7 @@ export const statusForErrorCode = (code: ApiErrorCode): number => {
     case 'FORBIDDEN': return 403;
     case 'NOT_FOUND': return 404;
     case 'CONFLICT': return 409;
-    case 'IDEMPOTENCY_KEY_REUSED': return 409;
+    case 'IDEMPOTENCY_KEY_REUSE': return 409;
     case 'RATE_LIMITED': return 429;
     case 'VALIDATION_FAILED': return 422;
     case 'INSUFFICIENT_STOCK': return 422;
@@ -64,24 +64,47 @@ export const statusForErrorCode = (code: ApiErrorCode): number => {
  * Convert any thrown error into a contract-safe response.
  * Never leaks raw SQL / driver messages to the client.
  */
+const CONTRACT_CODES: ApiErrorCode[] = [
+  'VALIDATION_FAILED', 'AUTH_FAILED', 'FORBIDDEN', 'NOT_FOUND', 'CONFLICT',
+  'RATE_LIMITED', 'SERVER_ERROR', 'INSUFFICIENT_STOCK', 'UNKNOWN_PRODUCT',
+  'UNKNOWN_FARMER', 'IDEMPOTENCY_KEY_REUSE', 'OFFLINE',
+];
+
+/**
+ * Drizzle/`pg` wrap driver failures, so the meaningful `code` can sit several
+ * `cause` levels deep (e.g. `_DrizzleQueryError -> error: duplicate key ... 23505`).
+ * Walk the chain instead of inspecting only the outermost error.
+ */
+const errorChain = (error: any): any[] => {
+  const chain: any[] = [];
+  let current = error;
+  for (let depth = 0; current && depth < 8; depth += 1) {
+    chain.push(current);
+    if (!current.cause || current.cause === current) break;
+    current = current.cause;
+  }
+  return chain;
+};
+
 export const toApiError = (error: any): { status: number; body: ApiResponse<never> } => {
-  // Explicit contract error raised by the service layer
-  if (error && typeof error.code === 'string' && statusForErrorCode(error.code) !== 500) {
-    const code = error.code as ApiErrorCode;
-    const details = error.authoritativeRecord ? { authoritativeRecord: error.authoritativeRecord } : error.details;
-    return { status: error.status || statusForErrorCode(code), body: createErrorResponse(code, error.message, details) };
+  const chain = errorChain(error);
+
+  // 1) Explicit contract error raised by the service layer (typed codes win).
+  const contract = chain.find((e) => e && typeof e.code === 'string' && CONTRACT_CODES.includes(e.code));
+  if (contract) {
+    const code = contract.code as ApiErrorCode;
+    const details = contract.authoritativeRecord ? { authoritativeRecord: contract.authoritativeRecord } : contract.details;
+    return { status: contract.status || statusForErrorCode(code), body: createErrorResponse(code, contract.message, details) };
   }
 
-  // Zod validation
-  if (error && Array.isArray(error.issues) && error.name === 'ZodError') {
-    return {
-      status: 422,
-      body: createErrorResponse('VALIDATION_FAILED', 'اطلاعات ارسالی نامعتبر است.', { errors: error.issues }),
-    };
+  // 2) Zod validation
+  const zod = chain.find((e) => e && Array.isArray(e.issues));
+  if (zod) {
+    return { status: 422, body: createErrorResponse('VALIDATION_FAILED', 'اطلاعات ارسالی نامعتبر است.', { errors: zod.issues }) };
   }
 
-  // PostgreSQL driver errors - map the important ones, never echo the SQL
-  const pgCode = error?.code;
+  // 3) PostgreSQL driver errors - mapped precisely, never echoing the SQL
+  const pgCode = chain.map((e) => e && e.code).find((c) => typeof c === 'string' && !!c);
   if (pgCode === '23503') {
     return { status: 422, body: createErrorResponse('VALIDATION_FAILED', 'رکورد مرتبط (محصول/مرغدار/فرمول) در سرور یافت نشد. لطفاً ابتدا آن را ذخیره کنید.') };
   }

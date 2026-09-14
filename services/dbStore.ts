@@ -1,17 +1,28 @@
 import { openDB, IDBPDatabase } from 'idb';
 
 const DB_NAME = 'NirV2DB';
-const DB_VERSION = 2;
+// v3 adds the `failedMutations` store (dead-letter queue). Nothing is dropped or rewritten:
+// the upgrade is purely additive, so existing browsers migrate without data loss.
+const DB_VERSION = 3;
+
+/** Maximum automatic attempts before a mutation is declared permanently failed. */
+export const MAX_SYNC_RETRIES = 5;
 
 export interface SyncMutation {
   id: string; // operationId
   entityType: string;
   action: 'create' | 'update' | 'delete';
   payload: any;
-  status: 'pending' | 'failed';
+  status: 'pending' | 'synced' | 'failed';
   retryCount: number;
   lastError?: string;
   timestamp: number;
+}
+
+/** A mutation that exhausted its retries and was moved out of the active queue. */
+export interface FailedMutation extends SyncMutation {
+  failedAt: number;
+  failureCode?: string;
 }
 
 export interface LegacyMigrationState {
@@ -33,6 +44,11 @@ export const initDB = () => {
           const syncQueue = db.createObjectStore('syncQueue', { keyPath: 'id' });
           syncQueue.createIndex('by-status', 'status');
         }
+        if (!db.objectStoreNames.contains('failedMutations')) {
+          // Dead-letter queue: permanently failed mutations live here, NEVER in syncQueue.
+          const failed = db.createObjectStore('failedMutations', { keyPath: 'id' });
+          failed.createIndex('by-failedAt', 'failedAt');
+        }
         if (!db.objectStoreNames.contains('system')) {
           db.createObjectStore('system', { keyPath: 'id' });
         }
@@ -40,6 +56,10 @@ export const initDB = () => {
     });
   }
   return dbPromise;
+};
+
+const dispatch = (event: string) => {
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event(event));
 };
 
 // Memory cache for synchronous UI reads
@@ -55,6 +75,8 @@ export const getCacheItem = (key: string) => {
   return memoryCache[key] ?? null;
 };
 
+// ---------------------------------------------------------------- active queue
+
 export const enqueueMutation = async (mutation: Omit<SyncMutation, 'status' | 'retryCount' | 'timestamp'>) => {
   const db = await initDB();
   const fullMutation: SyncMutation = {
@@ -64,7 +86,7 @@ export const enqueueMutation = async (mutation: Omit<SyncMutation, 'status' | 'r
     timestamp: Date.now(),
   };
   await db.put('syncQueue', fullMutation);
-  if (typeof window !== 'undefined') window.dispatchEvent(new Event('sync_queue_updated'));
+  dispatch('sync_queue_updated');
 };
 
 export const getPendingMutations = async () => {
@@ -72,22 +94,89 @@ export const getPendingMutations = async () => {
   return db.getAllFromIndex('syncQueue', 'by-status', 'pending');
 };
 
-export const getFailedMutations = async () => {
-  const db = await initDB();
-  return db.getAllFromIndex('syncQueue', 'by-status', 'failed');
-};
-
 export const updateMutation = async (mutation: SyncMutation) => {
   const db = await initDB();
   await db.put('syncQueue', mutation);
-  if (typeof window !== 'undefined') window.dispatchEvent(new Event('sync_queue_updated'));
+  dispatch('sync_queue_updated');
 };
 
 export const removeMutation = async (id: string) => {
   const db = await initDB();
   await db.delete('syncQueue', id);
-  if (typeof window !== 'undefined') window.dispatchEvent(new Event('sync_queue_updated'));
+  dispatch('sync_queue_updated');
 };
+
+export const getSyncQueueCount = async (): Promise<number> => {
+  const db = await initDB();
+  return (await db.getAllKeys('syncQueue')).length;
+};
+
+// ---------------------------------------------------------------- dead-letter queue
+
+export const getFailedMutationList = async (): Promise<FailedMutation[]> => {
+  const db = await initDB();
+  const rows = (await db.getAll('failedMutations')) as FailedMutation[];
+  return rows.sort((a, b) => (b.failedAt || 0) - (a.failedAt || 0));
+};
+
+/** Backwards-compatible alias: failed mutations are their own store now. */
+export const getFailedMutations = getFailedMutationList;
+
+export const getFailedMutationCount = async (): Promise<number> => {
+  const db = await initDB();
+  return (await db.getAllKeys('failedMutations')).length;
+};
+
+/**
+ * Move a mutation out of the retryable queue into the dead-letter queue.
+ * This is what keeps a permanently failing mutation from blocking every future
+ * hydration/sync cycle.
+ */
+export const moveToFailedMutations = async (id: string, failure: { code?: string; message?: string }) => {
+  const db = await initDB();
+  const mutation = (await db.get('syncQueue', id)) as SyncMutation | undefined;
+  if (mutation) {
+    const dead: FailedMutation = {
+      ...mutation,
+      status: 'failed',
+      failureCode: failure.code,
+      lastError: failure.message,
+      failedAt: Date.now(),
+    };
+    await db.put('failedMutations', dead);
+    await db.delete('syncQueue', id);
+  }
+  dispatch('sync_queue_updated');
+  dispatch('failed_mutations_updated');
+};
+
+/** Put a dead-lettered mutation back at the head of the retryable queue. */
+export const requeueFailedMutation = async (id: string) => {
+  const db = await initDB();
+  const dead = (await db.get('failedMutations', id)) as FailedMutation | undefined;
+  if (!dead) return false;
+  const { failedAt, failureCode, ...rest } = dead;
+  void failedAt; void failureCode;
+  await db.put('syncQueue', { ...rest, status: 'pending', retryCount: 0, timestamp: Date.now() } as SyncMutation);
+  await db.delete('failedMutations', id);
+  dispatch('sync_queue_updated');
+  dispatch('failed_mutations_updated');
+  return true;
+};
+
+export const discardFailedMutation = async (id: string) => {
+  const db = await initDB();
+  await db.delete('failedMutations', id);
+  dispatch('failed_mutations_updated');
+};
+
+export const clearFailedMutations = async () => {
+  const db = await initDB();
+  await db.clear('failedMutations');
+  dispatch('failed_mutations_updated');
+};
+
+// ---------------------------------------------------------------- system state
 
 export const getSystemState = async <T>(id: string): Promise<T | null> => {
   const db = await initDB();

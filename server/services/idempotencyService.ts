@@ -17,7 +17,7 @@ export const executeIdempotentOperation = async (params: IdempotentOperationPara
   const { operationId, userId, resourceType, operationType, resourceId, payload, execute } = params;
   
   // Create deterministic hash of payload
-  const requestFingerprint = crypto.createHash('sha256').update(JSON.stringify(payload || {})).digest('hex');
+  const payloadHash = crypto.createHash('sha256').update(JSON.stringify(payload || {})).digest('hex');
 
   return db.transaction(async (tx: any) => {
     // Check for existing operation
@@ -25,13 +25,15 @@ export const executeIdempotentOperation = async (params: IdempotentOperationPara
     
     if (existing.length > 0) {
       const prev = existing[0];
-      if (prev.requestFingerprint === requestFingerprint) {
+      // `payload_hash` is canonical; `request_fingerprint` is the pre-rename mirror.
+      const previousHash = prev.payloadHash || prev.requestFingerprint;
+      if (previousHash === payloadHash) {
         // Return original result safely
         return { duplicate: true, result: prev.originalResult };
       } else {
         // Collision detected
         const error = new Error('شناسه عملیات تکراری است اما محتوا متفاوت است.');
-        (error as any).code = 'IDEMPOTENCY_KEY_REUSED';
+        (error as any).code = 'IDEMPOTENCY_KEY_REUSE';
         throw error;
       }
     }
@@ -47,7 +49,8 @@ export const executeIdempotentOperation = async (params: IdempotentOperationPara
       payload,
       userId,
       resourceId: resourceId || null,
-      requestFingerprint,
+      payloadHash,
+      requestFingerprint: payloadHash, // deprecated mirror
       status: 'success',
       originalResult: result,
       createdAt: new Date(),

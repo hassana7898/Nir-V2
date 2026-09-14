@@ -217,6 +217,8 @@ export const inventory_transactions = pgTable("inventory_transactions", {
   balanceAfter: decimal("balance_after"),
   referenceType: text("reference_type"),
   referenceId: text("reference_id"),
+  // Immutable-ledger link: a reversal entry points at the transaction it reverses.
+  reversalOf: text("reversal_of"),
   batchId: text("batch_id").references(() => batches.id),
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -240,6 +242,9 @@ export const sync_mutations = pgTable("sync_mutations", {
   payload: json("payload"), // Will store the request fingerprint or payload
   userId: text("user_id").references(() => users.id),
   resourceId: text("resource_id"),
+  // Canonical idempotency hash of the request payload.
+  payloadHash: text("payload_hash"),
+  // Deprecated mirror kept for backward compatibility with rows written before the rename.
   requestFingerprint: text("request_fingerprint"),
   status: text("status").default("success"),
   originalResult: json("original_result"),

@@ -6,7 +6,7 @@ import { ApiResponse, ApiError, ApiErrorCode } from '../shared/apiContract';
 import { v4 as uuidv4 } from 'uuid';
 import { setCacheItem, getCacheItem, enqueueMutation, memoryCache } from './dbStore';
 
-import { initDB } from './dbStore';
+import { initDB, moveToFailedMutations, updateMutation, MAX_SYNC_RETRIES } from './dbStore';
 
 // Pure UI Preferences Storage (Non-sensitive, UI-only, e.g. sort orders, theme, view options)
 const localStorage = {
@@ -1358,13 +1358,40 @@ export const hydrateFromServer = async (): Promise<boolean> => {
     return false;
 };
 
+/**
+ * Drain the retryable outbox.
+ *
+ * Retry policy:
+ *  - success                                -> removed from the queue
+ *  - IDEMPOTENCY_KEY_REUSE                  -> already applied by the server, removed
+ *  - OFFLINE / unexpected                   -> retried (retryCount++), stays in syncQueue
+ *  - validation/stock/conflict/not-found    -> moved to `failedMutations` (dead-letter) at once,
+ *                                              because retrying cannot make them valid
+ *  - retries exhausted (MAX_SYNC_RETRIES)   -> moved to `failedMutations`
+ * Dead-lettered mutations never sit in syncQueue again, so they can no longer block
+ * hydration for every other change.
+ */
 export const triggerSync = async (): Promise<boolean> => {
-    // Basic sync loop for pending queue
     const db = await initDB();
     const pending = await db.getAllFromIndex('syncQueue', 'by-status', 'pending');
     if (pending.length === 0) return true;
-    
+
+    const TERMINAL_CODES = ['CONFLICT', 'VALIDATION_FAILED', 'INSUFFICIENT_STOCK', 'UNKNOWN_FARMER', 'UNKNOWN_PRODUCT', 'NOT_FOUND', 'AUTH_FAILED', 'FORBIDDEN'];
+
     let allSuccess = true;
+    const deadLetter = async (mutation: any, code?: string, message?: string) => {
+        await moveToFailedMutations(mutation.id, { code, message });
+    };
+    const scheduleRetry = async (mutation: any, code?: string, message?: string) => {
+        const retryCount = (mutation.retryCount || 0) + 1;
+        if (retryCount >= MAX_SYNC_RETRIES) {
+            await deadLetter(mutation, code, message);
+        } else {
+            await updateMutation({ ...mutation, retryCount, status: 'pending', lastError: message });
+            allSuccess = false;
+        }
+    };
+
     for (const mutation of pending) {
         try {
             let apiRes;
@@ -1375,23 +1402,29 @@ export const triggerSync = async (): Promise<boolean> => {
             } else if (mutation.action === 'delete') {
                 apiRes = await sendRestRequest(`/api/invoices/${encodeURIComponent(mutation.payload.id)}`, { method: 'DELETE', headers: { 'X-Operation-Id': mutation.id } });
             }
-            
+
             if (apiRes?.success) {
-                mutation.status = 'synced';
-                await db.put('syncQueue', mutation); // or delete
                 await db.delete('syncQueue', mutation.id);
-            } else {
-                if (apiRes?.error?.code === 'IDEMPOTENCY_KEY_REUSED' || apiRes?.error?.code === 'CONFLICT') {
-                    // It's technically resolved or we need to hydrate. Just remove from queue to stop blocking.
-                    await db.delete('syncQueue', mutation.id);
-                } else {
-                    allSuccess = false;
-                }
+                continue;
             }
-        } catch (e) {
-            allSuccess = false;
+
+            const code = apiRes?.error?.code;
+            const message = apiRes?.error?.message;
+            if (code === 'IDEMPOTENCY_KEY_REUSE') {
+                // The server already applied this exact operationId - nothing left to do.
+                await db.delete('syncQueue', mutation.id);
+            } else if (code === 'OFFLINE') {
+                allSuccess = false; // connectivity, not a data problem: retry later without burning attempts
+            } else if (TERMINAL_CODES.includes(code as string)) {
+                await deadLetter(mutation, code, message);
+            } else {
+                await scheduleRetry(mutation, code || 'SERVER_ERROR', message);
+            }
+        } catch (e: any) {
+            await scheduleRetry(mutation, 'NETWORK', e?.message);
         }
     }
+
     if (allSuccess) await hydrateFromServer();
     return allSuccess;
 };

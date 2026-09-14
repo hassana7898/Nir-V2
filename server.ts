@@ -39,6 +39,18 @@ const HOST = (process.env.HOST || "127.0.0.1").trim() || "127.0.0.1";
 // proxy makes req.ip (used by the rate limiters) the actual client.
 app.set("trust proxy", "loopback");
 
+// API responses must never be cached: Express' default ETag made the browser send
+// If-None-Match and receive a 304 with an empty body for /api/auth/status, which the
+// client interpreted as a failure and replaced with a STALE local answer (the app then
+// showed the login screen even though the database was empty).
+app.set("etag", false);
+app.use("/api", (_req, res, next) => {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  next();
+});
+
 app.use(securityHeaders);
 app.use(corsMiddleware);
 app.use(express.json({ limit: "50mb" }));

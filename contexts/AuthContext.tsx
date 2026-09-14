@@ -18,14 +18,25 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const [isPasswordSet, setIsPasswordSet] = useState(false);
     const [loading, setLoading] = useState(true);
 
-    const checkStatus = useCallback(() => {
-        setIsPasswordSet(authService.isPasswordSet());
-        setIsAuthenticated(authService.isAuthenticated());
-        setLoading(false);
+    // Both flags now come from the server (users table is authoritative), with a local
+    // offline fallback inside authService.
+    const checkStatus = useCallback(async () => {
+        setLoading(true);
+        try {
+            const passwordSet = await authService.isPasswordSet();
+            const authenticated = passwordSet ? await authService.isAuthenticated() : false;
+            setIsPasswordSet(passwordSet);
+            setIsAuthenticated(authenticated);
+        } catch {
+            setIsPasswordSet(false);
+            setIsAuthenticated(false);
+        } finally {
+            setLoading(false);
+        }
     }, []);
 
     useEffect(() => {
-        checkStatus();
+        void checkStatus();
     }, [checkStatus]);
 
     const login = async (password: string): Promise<boolean> => {
@@ -39,13 +50,13 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     };
 
     const logout = () => {
-        authService.logout();
+        void authService.logout();
         setIsAuthenticated(false);
     };
 
     const setupPassword = async (password: string): Promise<void> => {
         await authService.setPassword(password);
-        checkStatus();
+        await checkStatus();
     };
 
 

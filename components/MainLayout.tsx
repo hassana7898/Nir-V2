@@ -2,7 +2,8 @@
 import React, { useEffect, useState } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useSettings } from '../contexts/SettingsContext';
-import { hydrateFromServer } from '../services/dataService';
+import { useAuth } from '../contexts/AuthContext';
+import { hydrateFromServer, onUnauthorized } from '../services/dataService';
 import Sidebar from './Sidebar';
 import SyncStatusIndicator from './SyncStatusIndicator';
 import EntryPage from '../pages/EntryPage';
@@ -20,10 +21,16 @@ import GlobalSearchPage from '../pages/GlobalSearchPage';
 
 const MainLayout: React.FC = () => {
     const { loadSettings } = useSettings();
+    const { logout } = useAuth();
     // Gate rendering on a full hydration so every page mounts with a populated cache.
     // Without this, a freshly cleared browser rendered empty screens forever, because
     // each page reads synchronously from the local cache inside a one-shot effect.
     const [ready, setReady] = useState(false);
+
+    // If a 401/session-expiry is observed while we are inside the app (e.g. the cookie
+    // expired but a stale local flag still said "authenticated"), drop straight to the
+    // login screen instead of leaving the user on a blank dashboard.
+    useEffect(() => onUnauthorized(() => { logout(); }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
     useEffect(() => {
         let active = true;

@@ -92,13 +92,20 @@ const ensureFarmerExists = async (tx: any, farmerId: string, farmerName?: string
   throw contractError('UNKNOWN_FARMER', 'مرغدار انتخاب‌شده در سرور یافت نشد. لطفاً ابتدا مرغدار را ذخیره کنید و سپس حواله را ثبت کنید.', 422);
 };
 
+/**
+ * Negative inventory is ALLOWED by design: exits are frequently logged before the matching
+ * production/entry in this business. Each movement still requires a positive quantity, but the
+ * running stock may legitimately fall below zero, so the old hard block was removed.
+ * Set ALLOW_NEGATIVE_INVENTORY to false to restore the previous strict behaviour.
+ */
+const ALLOW_NEGATIVE_INVENTORY = true;
 const ensureSufficientStock = async (tx: any, productId: string, date: string, quantity: number) => {
   if (!Number.isFinite(quantity) || quantity <= 0) {
     throw contractError('VALIDATION_FAILED', 'مقدار وزن حواله باید بزرگ‌تر از صفر باشد.', 400);
   }
   const stock = await getInventoryStockByDate(date, tx);
   const available = stock[productId] || 0;
-  if (available < quantity) {
+  if (!ALLOW_NEGATIVE_INVENTORY && available < quantity) {
     throw contractError(
       'INSUFFICIENT_STOCK',
       `موجودی کافی نیست. موجودی فعلی: ${available} کیلوگرم، مقدار درخواستی: ${quantity} کیلوگرم`,

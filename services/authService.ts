@@ -104,6 +104,16 @@ export const logout = async (): Promise<void> => {
   sessionStorage.removeItem(SESSION_KEY);
 };
 
+/**
+ * Clears the local auth mirror (session flag + bearer token). Called when the server answers
+ * 401 so a stale local flag can never keep an authenticated-but-empty shell on screen; the
+ * AuthProvider then re-renders the login route.
+ */
+export const clearLocalAuth = (): void => {
+  try { sessionStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
+  try { window.localStorage.removeItem('nir_token'); } catch { /* ignore */ }
+};
+
 /** Server session first; the local flag is only an offline convenience. */
 export const isAuthenticated = async (): Promise<boolean> => {
   try {

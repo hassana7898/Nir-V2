@@ -7,6 +7,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { setCacheItem, getCacheItem, enqueueMutation, memoryCache } from './dbStore';
 
 import { initDB, moveToFailedMutations, updateMutation, MAX_SYNC_RETRIES } from './dbStore';
+import { clearLocalAuth } from './authService';
 
 // Pure UI Preferences Storage (Non-sensitive, UI-only, e.g. sort orders, theme, view options)
 const localStorage = {
@@ -89,6 +90,24 @@ interface ApiResult<T = any> {
 }
 
 
+const UNAUTHORIZED_EVENT = 'nir:unauthorized';
+
+/**
+ * Broadcast a session expiry so the UI can drop to the login screen instead of rendering an
+ * empty authenticated shell. Clears the local auth mirror first.
+ */
+export const notifyUnauthorized = (): void => {
+    try { clearLocalAuth(); } catch { /* ignore */ }
+    if (typeof window !== 'undefined') window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+};
+
+/** Subscribe to 401/session-expiry events. Returns an unsubscribe function. */
+export const onUnauthorized = (handler: () => void): (() => void) => {
+    if (typeof window === 'undefined') return () => { /* noop */ };
+    window.addEventListener(UNAUTHORIZED_EVENT, handler);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, handler);
+};
+
 export const sendRestRequest = async <T = any>(
     url: string,
     options: RequestInit = {}
@@ -109,8 +128,10 @@ export const sendRestRequest = async <T = any>(
             credentials: 'include',
         });
 
+        if (response.status === 401) notifyUnauthorized();
+
         const data = await response.json().catch(() => ({}));
-        
+
         if (response.ok) {
             return data as ApiResponse<T>;
         }
@@ -993,7 +1014,13 @@ export const getInventoryStatus = (until: Date): Map<string, number> => {
     const inventory = new Map<string, number>();
     settings.products.forEach(p => inventory.set(p.id, 0));
 
-    const allTransactions: any[] = [];
+    // Build the ledger view from the hydrated cache (invoices + production + adjustments).
+    // Previously this array was always empty, so every stock figure read 0 even with data loaded.
+    const allTransactions: any[] = [
+        ...getAllInvoices().map((inv: any) => ({ date: inv.date, createdAt: inv.createdAt || 0, type: 'invoice', data: inv })),
+        ...getProductionRecords().map((p: any) => ({ date: p.date, createdAt: p.createdAt || 0, type: 'production', data: p })),
+        ...getInventoryAdjustments().map((a: any) => ({ date: a.date, createdAt: a.createdAt || 0, type: 'adjustment', data: a })),
+    ];
 
     allTransactions.sort((a, b) => a.date.localeCompare(b.date) || a.createdAt - b.createdAt);
     const formulaMap = new Map(getFormulas().map(f => [f.finishedGoodId, f.items]));
@@ -1452,6 +1479,11 @@ export const hydrateFromServer = async (): Promise<boolean> => {
 
     try {
         const res = await fetch('/api/sync/state', { credentials: 'include', cache: 'no-store' });
+        if (res.status === 401) {
+            // Session expired: never hold an authenticated-but-empty shell on screen.
+            notifyUnauthorized();
+            return false;
+        }
         if (res.ok) {
             const s = await res.json();
             if (s && typeof s === 'object') {

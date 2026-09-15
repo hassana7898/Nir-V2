@@ -39,6 +39,9 @@ export const createProductionRecordInTransaction = async (tx: any, data: Product
     if (formulaItemRows.length === 0) throw new Error('فرمول تولید فاقد مواد اولیه است.');
   }
 
+  // Negative inventory is ALLOWED: a raw-material shortfall during production is recorded as
+  // a production_out movement (stock may go below zero) instead of blocking the batch.
+  const ALLOW_NEGATIVE_INVENTORY = true;
   const stock = await getInventoryStockByDate(data.date, tx);
   for (const item of formulaItemRows) {
     const percentage = Number(item.percentage || 0);
@@ -47,7 +50,7 @@ export const createProductionRecordInTransaction = async (tx: any, data: Product
     const rawMaterialQty = ratio > 0 ? qty * ratio : explicitQty;
     if (!Number.isFinite(rawMaterialQty) || rawMaterialQty <= 0) continue;
     const available = stock[item.productId] || 0;
-    if (available < rawMaterialQty) {
+    if (!ALLOW_NEGATIVE_INVENTORY && available < rawMaterialQty) {
       throw new Error(`موجودی ماده اولیه کافی نیست: ${item.productId}. موجودی ${available} و مقدار موردنیاز ${rawMaterialQty} است.`);
     }
   }

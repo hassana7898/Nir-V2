@@ -258,20 +258,22 @@ async function startServer() {
 
 // -----------------------------------------------------------------------------
 // Maintenance CLI (does NOT start the HTTP listener):
-//   node server.cjs --restore-legacy <file.json>
+//   node server.cjs --restore-legacy <file.json> [--wipe]
 // Restores a pre-V2 backup (the flat poultryApp* key -> value map) into PostgreSQL
 // using the exact same transactional importer as POST /api/backup/restore-legacy.
-// Idempotent: safe to run repeatedly.
+// Idempotent: safe to run repeatedly. Pass --wipe for a CLEAN restore (TRUNCATE the
+// business tables first; users/sessions/settings are always preserved).
 // -----------------------------------------------------------------------------
 if (process.argv[2] === "--restore-legacy") {
   (async () => {
     const file = process.argv[3];
     if (!file || !fs.existsSync(file)) {
-      console.error("[NIR] usage: server.cjs --restore-legacy <file.json>");
+      console.error("[NIR] usage: server.cjs --restore-legacy <file.json> [--wipe]");
       process.exit(2);
     }
+    const wipe = process.argv.includes("--wipe");
     const payload = JSON.parse(fs.readFileSync(file, "utf8"));
-    const report = await restoreLegacySnapshot(payload);
+    const report = await restoreLegacySnapshot(payload, { wipe });
     console.log("[NIR] legacy restore report:");
     console.log(JSON.stringify(report, null, 2));
     process.exit(0);

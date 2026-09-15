@@ -162,6 +162,7 @@ export async function runMigrations() {
         product_variant TEXT,
         is_crumble BOOLEAN DEFAULT FALSE,
         is_page_break BOOLEAN DEFAULT FALSE,
+        sort_order INTEGER,
         status TEXT DEFAULT 'completed',
         notes TEXT,
         created_by TEXT,
@@ -171,6 +172,8 @@ export async function runMigrations() {
       CREATE INDEX IF NOT EXISTS invoices_type_idx ON invoices(type);
       CREATE INDEX IF NOT EXISTS invoices_product_id_idx ON invoices(product_id);
       CREATE INDEX IF NOT EXISTS invoices_farmer_id_idx ON invoices(farmer_id);
+      -- Additive upgrade for databases created before per-day ordering was persisted.
+      ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sort_order INTEGER;
     `);
 
     await client.query(`

@@ -27,6 +27,18 @@ export interface LegacyRestoreReport {
   skippedKeys: string[];
   warnings: string[];
   totalRows: number;
+  /** true when the business tables were truncated before the import. */
+  wiped?: boolean;
+}
+
+export interface LegacyRestoreOptions {
+  /**
+   * TRUNCATE the business tables (invoices, ledger, production, adjustments, batches,
+   * formulas, farmers, drivers, origins) before importing. `users`, `sessions` and
+   * `settings` are always preserved. Runs inside the import transaction, so a failure
+   * rolls the wipe back too.
+   */
+  wipe?: boolean;
 }
 
 /** Keys that belong to the legacy business payload. */
@@ -88,15 +100,68 @@ const normaliseProductType = (raw: any, fallback: string): string => {
   return fallback;
 };
 
+/**
+ * Parse the legacy `sortOrder_entry_YYYY-MM-DD` / `sortOrder_exit_YYYY-MM-DD` keys into a
+ * per-invoice index. The old client stored invoice ids (as strings) in these arrays to
+ * remember the print/edit order for each day; entries and exits were ALWAYS kept in
+ * separate namespaces, so membership is itself a (partial) entry/exit signal.
+ */
+interface LegacySortInfo { type: 'entry' | 'exit'; order: number; }
+const buildLegacySortOrderIndex = (legacy: any): Map<string, LegacySortInfo> => {
+  const index = new Map<string, LegacySortInfo>();
+  for (const key of Object.keys(legacy)) {
+    const m = /^sortOrder_(entry|exit)_/.exec(key);
+    if (!m) continue;
+    const arr = legacy[key];
+    if (!Array.isArray(arr)) continue;
+    arr.forEach((v: any, i: number) => {
+      const id = v && typeof v === 'object' ? v.id : v;
+      if (id === undefined || id === null) return;
+      const sid = String(id);
+      if (!index.has(sid)) index.set(sid, { type: m[1] as 'entry' | 'exit', order: i });
+    });
+  }
+  return index;
+};
+
+/**
+ * Decide whether a legacy invoice is an entry (ورود) or an exit (خروج).
+ *
+ * Older exports tagged only ~12% of rows with an explicit `type`, which is exactly why
+ * the naive `inv.type === 'entry'` check funnelled every untagged ENTRY into the exit
+ * bucket. Three independent signals exist; the field SHAPE is the only one that is
+ * complete, so it is authoritative, with the explicit tag and `sortOrder_*` membership
+ * used as corroboration / tie-breakers:
+ *   - shape: entries carry seller/origin/bill fields, exits carry farmerId/weight
+ *   - explicit `type`
+ *   - `sortOrder_entry_*` / `sortOrder_exit_*` membership
+ */
+const resolveLegacyInvoiceType = (
+  inv: any,
+  sortIndex: Map<string, LegacySortInfo>,
+): { type: 'entry' | 'exit'; conflict: string | null } => {
+  const hasEntryShape = inv?.sellerName != null || inv?.billWeight != null || inv?.scaleWeight != null || inv?.billNumber != null || inv?.origin != null || inv?.transportCost != null;
+  const hasExitShape = inv?.farmerId != null || inv?.weight != null || inv?.invoiceNumber != null;
+  const shape: 'entry' | 'exit' | null = hasEntryShape && !hasExitShape ? 'entry' : hasExitShape && !hasEntryShape ? 'exit' : null;
+  const explicit: 'entry' | 'exit' | null = inv?.type === 'entry' ? 'entry' : inv?.type === 'exit' ? 'exit' : null;
+  const sort: 'entry' | 'exit' | null = inv?.id != null ? (sortIndex.get(String(inv.id))?.type ?? null) : null;
+
+  const resolved: 'entry' | 'exit' = shape ?? explicit ?? sort ?? 'exit';
+  const distinct = new Set(['entry', 'exit'].filter((t) => [shape, explicit, sort].includes(t as any)));
+  const conflict = distinct.size > 1 ? `shape=${shape}, type=${explicit}, sortOrder=${sort}` : null;
+  return { type: resolved, conflict };
+};
+
 type LedgerEvent =
   | { kind: 'invoice'; date: string; ts: number; productId: string; refId: string; quantity: number; entry: boolean }
   | { kind: 'production'; date: string; ts: number; productId: string; refId: string; quantity: number }
   | { kind: 'adjustment'; date: string; ts: number; productId: string; refId: string; newQuantity: number };
 
-export const restoreLegacySnapshot = async (legacy: any): Promise<LegacyRestoreReport> => {
+export const restoreLegacySnapshot = async (legacy: any, options: LegacyRestoreOptions = {}): Promise<LegacyRestoreReport> => {
   if (!isLegacySnapshot(legacy)) {
     throw new Error('Fingerprint does not match a legacy NIR backup (no known poultryApp* keys).');
   }
+  const sortIndex = buildLegacySortOrderIndex(legacy);
 
   const warnings: string[] = [];
   const skippedKeys: string[] = [];
@@ -116,6 +181,22 @@ export const restoreLegacySnapshot = async (legacy: any): Promise<LegacyRestoreR
 
   return db.transaction(async (tx: any) => {
     const restoredTables: Record<string, number> = {};
+
+    if (options.wipe) {
+      // Clean restore: empty the business tables. `users`, `sessions` and `settings` are
+      // preserved. TRUNCATE is transactional in PostgreSQL, so if anything below fails the
+      // entire wipe is rolled back - a broken import can never leave the app half-empty.
+      // Every table that references one of these is itself in the list, so no CASCADE is needed.
+      await tx.execute(sql`
+        TRUNCATE TABLE
+          inventory_transactions, inventory_adjustments, production_records, batches,
+          formula_items, formulas, invoices, farmers, drivers, origins
+      `);
+    }
+
+    // The legacy shape persists per-day ordering in `sortOrder_*` keys; make sure the column
+    // that stores it exists. Idempotent and safe on databases created before this change.
+    await tx.execute(sql`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sort_order integer`);
 
     // ---------------------------------------------------------------- settings
     if (settingsObj) {
@@ -280,7 +361,9 @@ export const restoreLegacySnapshot = async (legacy: any): Promise<LegacyRestoreR
       const productId = str(inv?.productId);
       if (!productId) { warnings.push(`invoice ${id} skipped: no productId`); continue; }
       seenInvoice.add(id);
-      const entry = inv?.type === 'entry';
+      const { type, conflict } = resolveLegacyInvoiceType(inv, sortIndex);
+      if (conflict) warnings.push(`invoice ${id}: conflicting type signals (${conflict}); using "${type}"`);
+      const entry = type === 'entry';
       const quantity = entry ? Number(inv?.scaleWeight || inv?.billWeight || 0) : -Number(inv?.weight || 0);
       invoiceRows.push({ id, data: inv, entry, quantity });
     }
@@ -308,6 +391,7 @@ export const restoreLegacySnapshot = async (legacy: any): Promise<LegacyRestoreR
       productVariant: str(data?.productVariant),
       isCrumble: Boolean(data?.isCrumble),
       isPageBreak: Boolean(data?.isPageBreak),
+      sortOrder: sortIndex.has(id) ? sortIndex.get(id)!.order : null,
       version: 1,
       createdAt: asDate(data?.createdAt, now),
       updatedAt: asDate(data?.createdAt, now),
@@ -324,6 +408,7 @@ export const restoreLegacySnapshot = async (legacy: any): Promise<LegacyRestoreR
           driverPhone: sql`excluded.driver_phone`, driverIBAN: sql`excluded.driver_iban`, wastage: sql`excluded.wastage`,
           farmerId: sql`excluded.farmer_id`, weight: sql`excluded.weight`, invoiceNumber: sql`excluded.invoice_number`,
           productVariant: sql`excluded.product_variant`, isCrumble: sql`excluded.is_crumble`, isPageBreak: sql`excluded.is_page_break`,
+          sortOrder: sql`excluded.sort_order`,
           updatedAt: sql`excluded.updated_at`, deletedAt: sql`excluded.deleted_at`,
         },
       });
@@ -476,6 +561,6 @@ export const restoreLegacySnapshot = async (legacy: any): Promise<LegacyRestoreR
     restoredTables.logs = logRows.length;
 
     const totalRows = Object.values(restoredTables).reduce((sum, n) => sum + n, 0);
-    return { restoredTables, skippedKeys, warnings, totalRows };
+    return { restoredTables, skippedKeys, warnings, totalRows, wiped: options.wipe === true };
   });
 };

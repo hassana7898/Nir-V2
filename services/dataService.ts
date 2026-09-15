@@ -845,7 +845,7 @@ export const exportData = async (): Promise<string> => {
  * Import a backup. Throws a precise, user-facing error when the restore fails -
  * a failed restore must never be reported as success by the UI.
  */
-export const importData = async (jsonData: string): Promise<ImportSummary> => {
+export const importData = async (jsonData: string, options: { wipe?: boolean } = {}): Promise<ImportSummary> => {
     let parsed: any;
     try {
         parsed = JSON.parse(jsonData);
@@ -872,7 +872,7 @@ export const importData = async (jsonData: string): Promise<ImportSummary> => {
             } catch { /* best-effort: quota / private mode */ }
         }
 
-        const res = await fetch('/api/backup/restore-legacy', {
+        const res = await fetch(`/api/backup/restore-legacy${options.wipe ? '?wipe=true' : ''}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',

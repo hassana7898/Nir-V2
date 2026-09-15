@@ -70,16 +70,25 @@ router.post('/restore', requireRole('ADMIN'), async (req, res) => {
   }
 });
 
-// POST /api/backup/restore-legacy - Restore a pre-V2 (flat poultryApp* map) backup
-router.post('/restore-legacy', requireRole('ADMIN'), async (req, res) => {
+// POST /api/backup/restore-legacy  |  POST /api/backup/import-legacy
+// Restore a pre-V2 (flat poultryApp* map) backup. Accepts either the raw payload or
+// `{ data, options: { wipe } }` (or `?wipe=true`). With wipe=true the business tables
+// are TRUNCATEd first (users/sessions/settings are always preserved) so a corrupted
+// ledger is replaced by a clean, fully-typed import in one transaction.
+const handleLegacyRestore = async (req: any, res: any) => {
   try {
-    const payload = req.body;
+    const body = req.body;
+    const payload = body && typeof body === 'object' && body.data && typeof body.data === 'object' ? body.data : body;
     if (!isLegacySnapshot(payload)) {
       return res.status(400).json({ error: 'Fingerprint does not match a legacy NIR backup.' });
     }
-    const result = await restoreLegacySnapshot(payload);
+    const wipe = String(req.query.wipe ?? '') === 'true'
+      || body?.options?.wipe === true
+      || body?.wipe === true;
+    const result = await restoreLegacySnapshot(payload, { wipe });
     res.json({
       success: true,
+      wiped: result.wiped,
       restoredTables: result.restoredTables,
       verifiedCounts: result.restoredTables,
       skippedKeys: result.skippedKeys,
@@ -90,6 +99,9 @@ router.post('/restore-legacy', requireRole('ADMIN'), async (req, res) => {
     console.error('Legacy restore error:', error);
     res.status(500).json({ error: error.message || 'Legacy restore failed.' });
   }
-});
+};
+
+router.post('/restore-legacy', requireRole('ADMIN'), handleLegacyRestore);
+router.post('/import-legacy', requireRole('ADMIN'), handleLegacyRestore);
 
 export default router;

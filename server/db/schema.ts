@@ -127,6 +127,8 @@ export const invoices = pgTable("invoices", {
   productVariant: text("product_variant"),
   isCrumble: boolean("is_crumble").default(false),
   isPageBreak: boolean("is_page_break").default(false),
+  // Per-day print/edit position carried by legacy `sortOrder_entry_*` / `sortOrder_exit_*` keys.
+  sortOrder: integer("sort_order"),
 
   version: integer("version").default(1).notNull(),
 

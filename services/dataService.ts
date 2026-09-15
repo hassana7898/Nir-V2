@@ -1408,7 +1408,7 @@ const coerceNum = (v: any): number => {
 const mapServerInvoice = (r: any): Remittance => {
     const isEntry = r?.type === 'entry' || (r?.type == null && r?.sellerName != null);
     if (isEntry) {
-        return {
+        const entry: any = {
             ...r,
             sellerName: r.sellerName ?? '',
             billWeight: coerceNum(r.billWeight),
@@ -1416,7 +1416,15 @@ const mapServerInvoice = (r: any): Remittance => {
             wastage: coerceNum(r.wastage),
             transportCost: coerceNum(r.transportCost),
             createdAt: coerceMs(r.createdAt),
-        } as unknown as Entry;
+        };
+        // Key-presence convention the whole UI relies on:
+        //   entry -> `'sellerName' in inv` === true  AND  `'farmerId' in inv` === false
+        //   exit  -> `'sellerName' in inv` === false AND  `'farmerId' in inv` === true
+        // The server sends every column for both shapes, so the opposite key must be removed.
+        // (reports/global-search/analysis detect entries via 'sellerName';
+        //  farmers/active-broods/analysis detect exits via 'farmerId'.)
+        delete entry.farmerId;
+        return entry as Entry;
     }
     const exit: any = {
         ...r,

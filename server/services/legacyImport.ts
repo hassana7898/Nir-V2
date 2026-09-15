@@ -378,7 +378,9 @@ export const restoreLegacySnapshot = async (legacy: any, options: LegacyRestoreO
       sellerName: str(data?.sellerName),
       billWeight: dec(data?.billWeight),
       scaleWeight: dec(data?.scaleWeight),
-      factory: str(data?.factory) ?? str(settingsObj?.factoryName),
+      // Preserve the legacy value EXACTLY: an explicit "" stays empty, a missing key stays null.
+      // Never substitute the company name - the historical value is authoritative.
+      factory: data?.factory === undefined || data?.factory === null ? null : String(data.factory),
       billNumber: str(data?.billNumber),
       origin: str(data?.origin),
       transportCost: dec(data?.transportCost),

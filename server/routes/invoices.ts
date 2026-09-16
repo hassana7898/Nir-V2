@@ -40,6 +40,7 @@ const InvoiceSchema = z.object({
   productVariant: z.string().optional(),
   isCrumble: z.boolean().optional(),
   isPageBreak: z.boolean().optional(),
+  notes: z.string().optional(),
   expectedVersion: z.number().optional(),
 });
 

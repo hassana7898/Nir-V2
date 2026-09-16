@@ -1,5 +1,63 @@
+/* ------------------------------------------------------------------
+   Sahel v3.4.0 - LOCAL, self-hosted (Iran intranet / offline mode).
+   The old second line of this file was an external @import that pulled
+   the Sahel web-font stylesheet from a public content-delivery network.
+   That external import has been REMOVED. The font files are now
+   self-hosted and served by Vite from public/fonts/sahel/, which is
+   exposed at the site root  =>  /fonts/sahel/<file>
+   No external network reference remains in this file.
+   ------------------------------------------------------------------ */
 
-@import url('https://cdn.jsdelivr.net/gh/rastikerdar/sahel-font@v3.4.0/dist/font-face.css');
+
+@font-face {
+    font-family: 'Sahel';
+    font-style: normal;
+    font-weight: 300;
+    font-display: swap;
+    src: url('/fonts/sahel/Sahel-Light.woff2') format('woff2'),
+         url('/fonts/sahel/Sahel-Light.woff') format('woff'),
+         url('/fonts/sahel/Sahel-Light.ttf') format('truetype');
+}
+
+@font-face {
+    font-family: 'Sahel';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url('/fonts/sahel/Sahel.woff2') format('woff2'),
+         url('/fonts/sahel/Sahel.woff') format('woff'),
+         url('/fonts/sahel/Sahel.ttf') format('truetype');
+}
+
+@font-face {
+    font-family: 'Sahel';
+    font-style: normal;
+    font-weight: 600;
+    font-display: swap;
+    src: url('/fonts/sahel/Sahel-SemiBold.woff2') format('woff2'),
+         url('/fonts/sahel/Sahel-SemiBold.woff') format('woff'),
+         url('/fonts/sahel/Sahel-SemiBold.ttf') format('truetype');
+}
+
+@font-face {
+    font-family: 'Sahel';
+    font-style: normal;
+    font-weight: 700;
+    font-display: swap;
+    src: url('/fonts/sahel/Sahel-Bold.woff2') format('woff2'),
+         url('/fonts/sahel/Sahel-Bold.woff') format('woff'),
+         url('/fonts/sahel/Sahel-Bold.ttf') format('truetype');
+}
+
+@font-face {
+    font-family: 'Sahel';
+    font-style: normal;
+    font-weight: 900;
+    font-display: swap;
+    src: url('/fonts/sahel/Sahel-Black.woff2') format('woff2'),
+         url('/fonts/sahel/Sahel-Black.woff') format('woff'),
+         url('/fonts/sahel/Sahel-Black.ttf') format('truetype');
+}
 
 @tailwind base;
 @tailwind components;

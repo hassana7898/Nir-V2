@@ -42,6 +42,11 @@ export const recordInventoryTransaction = async (tx: any, params: RecordTransact
   if (!Number.isFinite(params.quantity)) throw new Error('مقدار تراکنش انبار نامعتبر است.');
   if (!params.productId) throw new Error('محصول برای تراکنش انبار الزامی است.');
 
+  // Serialize writers per product inside the caller's transaction so concurrent ledger
+  // writers (online + offline sync) cannot lose each other's updates during the
+  // read-modify-write of balance_after / currentStock. Lock is released at transaction end.
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${params.productId}))`);
+
   const transactionId = randomUUID();
   const now = new Date();
   await tx.insert(inventory_transactions).values({

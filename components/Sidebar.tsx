@@ -1,68 +1,188 @@
 
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useSettings } from '../contexts/SettingsContext';
 import { useAuth } from '../contexts/AuthContext';
+import { getSyncState, SYNC_STATE_EVENT } from '../services/dataService';
+import { getPendingMutations } from '../services/dbStore';
+import { toPersianNumerals } from '../utils/formatters';
 
-const Sidebar: React.FC = () => {
+type SidebarSyncStatus = 'offline' | 'syncing' | 'pending' | 'online';
+
+/**
+ * Compact connectivity/sync probe for the sidebar footer.
+ *
+ * Reuses the SAME sources as components/SyncStatusIndicator.tsx instead of loading a
+ * second copy of the sync logic:
+ *   - `getSyncState()` + the `sync_state_changed` window event (services/dataService)
+ *   - the `sync_queue_updated` window event (services/dbStore outbox)
+ *   - `navigator.onLine` + the browser `online`/`offline` events
+ * Every read is guarded so a missing IndexedDB (or a non-browser build) can never
+ * throw inside the navigation shell.
+ */
+const useSidebarSyncStatus = (): { status: SidebarSyncStatus; pendingCount: number } => {
+    const [online, setOnline] = useState<boolean>(() =>
+        typeof navigator !== 'undefined' ? navigator.onLine : true
+    );
+    const [syncing, setSyncing] = useState<boolean>(() => getSyncState().syncing);
+    const [pendingCount, setPendingCount] = useState(0);
+
+    useEffect(() => {
+        const goOnline = () => setOnline(true);
+        const goOffline = () => setOnline(false);
+        window.addEventListener('online', goOnline);
+        window.addEventListener('offline', goOffline);
+        return () => {
+            window.removeEventListener('online', goOnline);
+            window.removeEventListener('offline', goOffline);
+        };
+    }, []);
+
+    useEffect(() => {
+        const onSyncState = () => setSyncing(getSyncState().syncing);
+        onSyncState();
+        window.addEventListener(SYNC_STATE_EVENT, onSyncState);
+        return () => window.removeEventListener(SYNC_STATE_EVENT, onSyncState);
+    }, []);
+
+    useEffect(() => {
+        let active = true;
+        const refresh = async () => {
+            try {
+                const queued = await getPendingMutations();
+                if (active) setPendingCount(queued.length);
+            } catch {
+                /* IndexedDB unavailable - keep the last known count */
+            }
+        };
+        const onChange = () => void refresh();
+        void refresh();
+        window.addEventListener('sync_queue_updated', onChange);
+        const interval = window.setInterval(onChange, 15000);
+        return () => {
+            active = false;
+            window.removeEventListener('sync_queue_updated', onChange);
+            window.clearInterval(interval);
+        };
+    }, []);
+
+    const status: SidebarSyncStatus = !online
+        ? 'offline'
+        : syncing
+            ? 'syncing'
+            : pendingCount > 0
+                ? 'pending'
+                : 'online';
+
+    return { status, pendingCount };
+};
+
+const syncDotClass = (status: SidebarSyncStatus): string => {
+    switch (status) {
+        case 'offline':
+            return 'bg-amber-500';
+        case 'syncing':
+            return 'animate-pulse bg-sky-500';
+        case 'pending':
+            return 'bg-sky-500';
+        default:
+            return 'bg-green-500';
+    }
+};
+
+const syncStatusLabel = (status: SidebarSyncStatus, pendingCount: number): string => {
+    switch (status) {
+        case 'offline':
+            return 'آفلاین';
+        case 'syncing':
+            return 'در حال همگام‌سازی…';
+        case 'pending':
+            return `در انتظار همگام‌سازی: ${toPersianNumerals(pendingCount)}`;
+        default:
+            return 'آنلاین';
+    }
+};
+
+const Sidebar: React.FC<{ open: boolean; onClose: () => void }> = ({ open, onClose }) => {
     const { settings } = useSettings();
     const { logout } = useAuth();
+    const { status: syncStatus, pendingCount } = useSidebarSyncStatus();
     
     const navLinkClass = ({ isActive }: { isActive: boolean }): string => {
         return `flex items-center p-3 rounded-lg mb-2 transition-colors ${isActive ? 'bg-slate-700' : 'hover:bg-sky-600'}`;
     };
 
     return (
-        <aside className="w-64 bg-slate-800 text-white p-4 flex flex-col no-print">
-            <div className="text-2xl font-bold mb-8 text-center border-b border-slate-600 pb-4">
-                <span>{settings.factoryName}</span>
+        <>
+            {/* Mobile backdrop: dims the page and closes the drawer on tap. */}
+            <div
+                className={`fixed inset-0 z-40 bg-black/50 md:hidden transition-opacity duration-300 ${open ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+                onClick={onClose}
+                aria-hidden="true"
+            />
+            <aside
+                id="app-sidebar"
+                className={`fixed inset-y-0 right-0 z-50 w-64 max-w-[85vw] shrink-0 bg-slate-800 text-white p-4 flex flex-col overflow-y-auto no-print transform transition-transform duration-300 md:static md:translate-x-0 md:z-auto md:max-w-none ${open ? 'translate-x-0' : 'translate-x-full'}`}
+            >
+            <div className="flex items-start justify-between gap-2 mb-8 border-b border-slate-600 pb-4">
+                <span className="text-2xl font-bold text-center flex-1">{settings.factoryName}</span>
+                <button
+                    type="button"
+                    onClick={onClose}
+                    aria-label="بستن منو"
+                    className="md:hidden p-2 -mt-1 rounded-lg hover:bg-slate-700 shrink-0 min-h-[40px] min-w-[40px] flex items-center justify-center"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
             </div>
             <nav className="flex-grow">
-                <NavLink to="/dashboard" className={navLinkClass}>
+                <NavLink to="/dashboard" className={navLinkClass} onClick={onClose}>
                     <DashboardIcon className="h-6 w-6 ml-3" />
                     <span>داشبورد</span>
                 </NavLink>
-                <NavLink to="/entry" className={navLinkClass}>
+                <NavLink to="/entry" className={navLinkClass} onClick={onClose}>
                     <EntryIcon className="h-6 w-6 ml-3" />
                     <span>حواله ورود</span>
                 </NavLink>
-                <NavLink to="/exit" className={navLinkClass}>
+                <NavLink to="/exit" className={navLinkClass} onClick={onClose}>
                     <ExitIcon className="h-6 w-6 ml-3" />
                     <span>حواله خروج</span>
                 </NavLink>
-                 <NavLink to="/farmers" className={navLinkClass}>
+                 <NavLink to="/farmers" className={navLinkClass} onClick={onClose}>
                     <FarmerIcon className="h-6 w-6 ml-3" />
                     <span>مدیریت مرغداران</span>
                 </NavLink>
-                <NavLink to="/broods" className={navLinkClass}>
+                <NavLink to="/broods" className={navLinkClass} onClick={onClose}>
                     <BroodIcon className="h-6 w-6 ml-3" />
                     <span>مدیریت دوره‌ها</span>
                 </NavLink>
-                <NavLink to="/inventory" className={navLinkClass}>
+                <NavLink to="/inventory" className={navLinkClass} onClick={onClose}>
                     <InventoryIcon className="h-6 w-6 ml-3" />
                     <span>انبارداری</span>
                 </NavLink>
-                 <NavLink to="/inventory-analysis" className={navLinkClass}>
+                 <NavLink to="/inventory-analysis" className={navLinkClass} onClick={onClose}>
                     <AnalysisIcon className="h-6 w-6 ml-3" />
                     <span>آنالیز انبار</span>
                 </NavLink>
-                <NavLink to="/production" className={navLinkClass}>
+                <NavLink to="/production" className={navLinkClass} onClick={onClose}>
                     <ProductionIcon className="h-6 w-6 ml-3" />
                     <span>تولید</span>
                 </NavLink>
-                <NavLink to="/global-search" className={navLinkClass}>
+                <NavLink to="/global-search" className={navLinkClass} onClick={onClose}>
                     <SearchIcon className="h-6 w-6 ml-3" />
                     <span>جستجوی سراسری</span>
                 </NavLink>
-                <NavLink to="/reports" className={navLinkClass}>
+                <NavLink to="/reports" className={navLinkClass} onClick={onClose}>
                     <ReportsIcon className="h-6 w-6 ml-3" />
                     <span>گزارش‌گیری</span>
                 </NavLink>
-                <NavLink to="/log" className={navLinkClass}>
+                <NavLink to="/log" className={navLinkClass} onClick={onClose}>
                     <LogIcon className="h-6 w-6 ml-3" />
                     <span>سابقه فعالیت</span>
                 </NavLink>
-                <NavLink to="/settings" className={navLinkClass}>
+                <NavLink to="/settings" className={navLinkClass} onClick={onClose}>
                     <SettingsIcon className="h-6 w-6 ml-3" />
                     <span>تنظیمات</span>
                 </NavLink>
@@ -72,11 +192,17 @@ const Sidebar: React.FC = () => {
                     <LogoutIcon className="h-6 w-6 ml-3" />
                     <span>خروج از حساب</span>
                 </button>
-                <div className="text-xs text-slate-400 text-center mt-2">
-                    <p>حالت: <span>آفلاین</span></p>
+                <div
+                    className="mt-2 flex items-center justify-center gap-2 text-xs text-slate-400"
+                    title={syncStatusLabel(syncStatus, pendingCount)}
+                    aria-live="polite"
+                >
+                    <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${syncDotClass(syncStatus)}`} />
+                    <span className="min-w-0 truncate">{syncStatusLabel(syncStatus, pendingCount)}</span>
                 </div>
             </div>
-        </aside>
+            </aside>
+        </>
     );
 };
 

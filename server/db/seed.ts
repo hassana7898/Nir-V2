@@ -31,6 +31,18 @@ export async function runSeed() {
       console.log('[NIR SEED] Created default admin user (username: admin, pass: admin123)');
     }
 
+    // 1b. Default Viewer (read-only) User — created idempotently so RBAC can be
+    // tested out of the box. Safe no-op on databases that already have it.
+    const viewerCheck = await client.query(`SELECT id FROM users WHERE username = 'viewer' LIMIT 1`);
+    if (viewerCheck.rows.length === 0) {
+      const viewerHash = await bcrypt.hash('123456', 12);
+      await client.query(`
+        INSERT INTO users (id, username, password_hash, role, full_name)
+        VALUES ($1, $2, $3, $4, $5)
+      `, [randomUUID(), 'viewer', viewerHash, 'VIEWER', 'کاربر بازدیدکننده (فقط‌خواند)']);
+      console.log('[NIR SEED] Created default viewer user (username: viewer, pass: 123456, role: VIEWER)');
+    }
+
     // 2. Default Factory Settings
     await client.query(`
       INSERT INTO settings (id, data, updated_at)

@@ -143,3 +143,17 @@ export const requireRole = (...allowedRoles: string[]) => {
     return res.status(403).json({ error: 'عدم دسترسی: شما مجوز لازم برای این عملیات را ندارید.' });
   };
 };
+
+// Enforce read-only access for the VIEWER role at the API layer.
+// This middleware does NOT authenticate: it assumes req.user has already been set
+// (it must be mounted immediately after requireAuth). Any non-safe HTTP method
+// (i.e. anything other than GET/HEAD/OPTIONS) attempted by a VIEWER is rejected.
+export const blockViewerWrites = (req: Request, res: Response, next: NextFunction) => {
+  const method = (req.method || 'GET').toUpperCase();
+  const isSafeMethod = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
+  const role = (req.user?.role || '').toUpperCase();
+  if (!isSafeMethod && role === 'VIEWER') {
+    return res.status(403).json({ error: 'کاربر مشاهده‌گر مجاز به تغییر داده‌ها نیست.' });
+  }
+  return next();
+};

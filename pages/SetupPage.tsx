@@ -34,7 +34,7 @@ const SetupPage: React.FC = () => {
     };
 
     return (
-        <div className="flex items-center justify-center min-h-screen bg-slate-100">
+        <div className="flex items-center justify-center min-h-screen bg-slate-100 px-4">
             <div className="p-8 bg-white rounded-xl shadow-md w-full max-w-sm">
                 <h1 className="text-2xl font-bold text-center text-slate-700 mb-2">راه‌اندازی اولیه</h1>
                 <p className="text-sm text-center text-slate-500 mb-6">برای امنیت، لطفا یک رمز عبور برای برنامه تنظیم کنید.</p>

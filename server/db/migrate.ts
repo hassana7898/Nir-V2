@@ -25,6 +25,8 @@ export async function runMigrations() {
         password_hash TEXT NOT NULL,
         role TEXT NOT NULL DEFAULT 'ADMIN',
         full_name TEXT,
+        totp_secret TEXT,
+        is_2fa_enabled BOOLEAN NOT NULL DEFAULT FALSE,
         created_at TIMESTAMP NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMP NOT NULL DEFAULT NOW()
       );
@@ -293,6 +295,45 @@ export async function runMigrations() {
         user_id TEXT REFERENCES users(id),
         created_at TIMESTAMP NOT NULL DEFAULT NOW()
       );
+    `);
+
+    // ------------------------------------------------------------------
+    // Additive schema-parity upgrades.
+    // These columns are required by server/db/schema.ts and were added to the
+    // live database over time, but were never folded back into the CREATE TABLE
+    // statements above. Without them a FRESH install (or a disaster-recovery
+    // restore from this script) produced a database the server could not query:
+    //   * every invoice/product/... SELECT 500'd on the missing `version`,
+    //   * offline idempotency 500'd on the missing `sync_mutations.resource_id`.
+    // `ADD COLUMN IF NOT EXISTS` is a no-op on already-migrated databases.
+    await client.query(`
+      ALTER TABLE products              ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE farmers               ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE drivers               ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE origins               ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE invoices              ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE batches               ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE formulas              ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE formula_items         ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE production_records    ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE inventory_adjustments ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS reversal_of TEXT;
+      ALTER TABLE sync_mutations ADD COLUMN IF NOT EXISTS resource_id TEXT;
+      ALTER TABLE sync_mutations ADD COLUMN IF NOT EXISTS payload_hash TEXT;
+      ALTER TABLE sync_mutations ADD COLUMN IF NOT EXISTS request_fingerprint TEXT;
+      ALTER TABLE sync_mutations ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'success';
+      ALTER TABLE sync_mutations ADD COLUMN IF NOT EXISTS original_result JSONB;
+      CREATE INDEX IF NOT EXISTS sync_mutations_created_at_idx ON sync_mutations(created_at);
+      CREATE INDEX IF NOT EXISTS sync_mutations_fingerprint_idx ON sync_mutations(id, request_fingerprint);
+    `);
+
+    // Additive upgrade for TOTP / two-factor authentication. These columns are
+    // required by server/db/schema.ts; adding them here lets existing databases
+    // (created before 2FA existed) upgrade safely. `ADD COLUMN IF NOT EXISTS`
+    // is a no-op on already-migrated databases, so this block is idempotent.
+    await client.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_secret TEXT;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS is_2fa_enabled BOOLEAN NOT NULL DEFAULT FALSE;
     `);
 
     await client.query('COMMIT');

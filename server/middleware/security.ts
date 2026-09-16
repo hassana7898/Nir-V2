@@ -6,14 +6,14 @@ export const securityHeaders = (_req: Request, res: Response, next: NextFunction
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   // Allow framing for AI Studio live preview.
   // `default-src` stays locked down; explicit `style-src`/`font-src` are required because
-  // the UI loads the Sahel webfont (font-face CSS + woff2 files) from jsDelivr, and without
-  // them those types fall back to default-src and the stylesheet is blocked.
+  // the UI ships its own font-face CSS and woff2 assets. The Sahel webfont is now served
+  // self-hosted from /fonts/sahel/ (no external CDN), so no jsDelivr origin is allow-listed.
   res.setHeader(
     'Content-Security-Policy',
     [
       "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: ws: wss:",
-      "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
-      "font-src 'self' data: https://cdn.jsdelivr.net",
+      "style-src 'self' 'unsafe-inline'",
+      "font-src 'self' data:",
       'frame-ancestors *',
     ].join('; ') + ';'
   );

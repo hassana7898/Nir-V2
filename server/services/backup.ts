@@ -238,3 +238,144 @@ export const restoreDatabase = async (backupData: any): Promise<RestoreReport> =
 
   return { restoredTables, skippedTables, verifiedCounts, totalRows };
 };
+
+// ---------------------------------------------------------------------------
+// Automated cron backups.
+//
+// Scheduled snapshots live in <project root>/backups as
+// `auto-backup-YYYY-MM-DD-HH-MM.json`. They are produced by the 12h scheduler
+// (server/scheduler.ts), listed for the admin UI, pruned to a 15-day window and
+// restorable straight from the server file system (no client upload needed).
+// ---------------------------------------------------------------------------
+
+/** Directory holding scheduled `auto-backup-*.json` snapshots (project root). */
+export const autoBackupDir = (): string => path.join(process.cwd(), 'backups');
+
+/** Only files created by the scheduler are ever listed, pruned or restored. */
+const AUTO_BACKUP_PATTERN = /^auto-backup-.*\.json$/;
+
+const ensureAutoBackupDir = (): string => {
+  const dir = autoBackupDir();
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+};
+
+/** Local-time stamp `YYYY-MM-DD-HH-MM` (same minute => same name => overwrite). */
+const autoBackupTimestamp = (date: Date = new Date()): string => {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}-${pad(date.getHours())}-${pad(date.getMinutes())}`;
+};
+
+/**
+ * Write a full JSON snapshot to `<project root>/backups/auto-backup-<ts>.json`.
+ * A run inside the same minute overwrites the previous file, so retries and the
+ * startup backup never stack up duplicate files.
+ */
+export const writeAutoBackup = async (): Promise<{ fileName: string; sizeBytes: number; filePath: string }> => {
+  const dir = ensureAutoBackupDir();
+  const fileName = `auto-backup-${autoBackupTimestamp()}.json`;
+  const filePath = path.join(dir, fileName);
+
+  const snapshot = await exportSnapshot();
+  fs.writeFileSync(filePath, JSON.stringify(snapshot), 'utf-8');
+
+  const stats = fs.statSync(filePath);
+  return { fileName, sizeBytes: stats.size, filePath };
+};
+
+/** List scheduled backups (`auto-backup-*.json`), newest first. */
+export const listAutoBackups = (): { name: string; sizeBytes: number; mtime: string }[] => {
+  const dir = ensureAutoBackupDir();
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+
+  return entries
+    .filter((name) => AUTO_BACKUP_PATTERN.test(name))
+    .map((name) => {
+      const stat = fs.statSync(path.join(dir, name));
+      return { name, sizeBytes: stat.size, mtime: stat.mtime.toISOString() };
+    })
+    .sort((a, b) => {
+      if (a.mtime === b.mtime) return a.name < b.name ? 1 : -1;
+      return a.mtime < b.mtime ? 1 : -1;
+    });
+};
+
+/**
+ * Delete scheduled backups older than `maxAgeDays` (default 15). Returns the
+ * number of files removed. Only `auto-backup-*.json` files are ever touched.
+ */
+export const pruneOldBackups = (maxAgeDays = 15): number => {
+  const dir = ensureAutoBackupDir();
+  const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
+  let deleted = 0;
+
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return 0;
+  }
+
+  for (const name of entries) {
+    if (!AUTO_BACKUP_PATTERN.test(name)) continue;
+    const filePath = path.join(dir, name);
+    try {
+      const stat = fs.statSync(filePath);
+      if (stat.mtimeMs < cutoff) {
+        fs.unlinkSync(filePath);
+        deleted += 1;
+      }
+    } catch {
+      /* ignore an unreadable/locked single file and continue pruning */
+    }
+  }
+  return deleted;
+};
+
+/**
+ * 1-click restore from a server-side scheduled backup.
+ *
+ * The filename is sanitized with `path.basename` (defeating `../` traversal),
+ * must match `auto-backup-*.json`, must resolve inside the backups directory and
+ * must parse to a snapshot-shaped object. The parsed snapshot is then handed to
+ * the proven `restoreDatabase` clean-restore.
+ */
+export const restoreFromServerFile = async (fileName: string): Promise<RestoreReport> => {
+  const safeName = path.basename(String(fileName ?? ''));
+  if (!safeName || !AUTO_BACKUP_PATTERN.test(safeName)) {
+    throw new Error('نام فایل پشتیبان نامعتبر است.');
+  }
+
+  const dir = path.resolve(autoBackupDir());
+  const filePath = path.resolve(dir, safeName);
+  if (path.dirname(filePath) !== dir) {
+    throw new Error('مسیر فایل پشتیبان نامعتبر است.');
+  }
+  if (!fs.existsSync(filePath)) {
+    throw new Error('فایل پشتیبان یافت نشد.');
+  }
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  } catch {
+    throw new Error('فایل پشتیبان قابل خواندن نیست (JSON نامعتبر).');
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('ساختار فایل پشتیبان نامعتبر است.');
+  }
+  const tables = (parsed as { tables?: unknown }).tables;
+  if (!tables || typeof tables !== 'object' || Array.isArray(tables)) {
+    throw new Error('ساختار فایل پشتیبان نامعتبر است: بخش «tables» یافت نشد.');
+  }
+
+  return restoreDatabase(parsed);
+};

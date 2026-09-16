@@ -6,6 +6,10 @@ export const users = pgTable("users", {
   passwordHash: text("password_hash").notNull(),
   role: text("role").default("ADMIN").notNull(),
   fullName: text("full_name"),
+  // TOTP (2FA). totpSecret holds the pending/active base32 secret; is2faEnabled is only
+  // set true after the user proves possession by verifying a code from their authenticator.
+  totpSecret: text("totp_secret"),
+  is2faEnabled: boolean("is_2fa_enabled").default(false).notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

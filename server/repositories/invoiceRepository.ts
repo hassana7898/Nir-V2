@@ -1,4 +1,4 @@
-import { eq, and, isNull, desc, asc, like, or, sql } from 'drizzle-orm';
+import { eq, and, isNull, desc, asc, ilike, or, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { invoices } from '../db/schema';
 
@@ -39,11 +39,17 @@ export const findInvoicesWithPagination = async (params: InvoiceQueryParams) => 
     const q = `%${params.search.trim()}%`;
     conditions.push(
       or(
-        like(invoices.driverName, q),
-        like(invoices.sellerName, q),
-        like(invoices.billNumber, q),
-        like(invoices.invoiceNumber, q),
-        like(invoices.productName, q)
+        ilike(invoices.driverName, q),
+        ilike(invoices.sellerName, q),
+        ilike(invoices.billNumber, q),
+        ilike(invoices.invoiceNumber, q),
+        ilike(invoices.productName, q),
+        // Invoice free-text (Persian «توضیحات»). The only free-text column on the
+        // `invoices` table is `notes` (`invoices.notes`); it is shared by BOTH entry
+        // and exit rows, so this single predicate covers both invoice kinds.
+        ilike(invoices.notes, q),
+        // Exit sub-type / description free-text (already surfaced in the UI).
+        ilike(invoices.productVariant, q)
       )!
     );
   }
@@ -52,7 +58,7 @@ export const findInvoicesWithPagination = async (params: InvoiceQueryParams) => 
 
   const [totalRows, data] = await Promise.all([
     db.select({ count: sql<number>`count(*)` }).from(invoices).where(whereClause),
-    db.select().from(invoices).where(whereClause).orderBy(desc(invoices.date), desc(invoices.createdAt)).limit(limit).offset(offset),
+    db.select().from(invoices).where(whereClause).orderBy(desc(invoices.date), desc(invoices.createdAt), desc(invoices.id)).limit(limit).offset(offset),
   ]);
 
   const total = Number(totalRows[0]?.count || 0);

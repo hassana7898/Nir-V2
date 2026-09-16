@@ -6,8 +6,10 @@ import { useSettings } from '../contexts/SettingsContext';
 import { toPersianNumerals, formatToISODate } from '../utils/formatters';
 import { showToast } from '../utils/helpers';
 import Swal from 'sweetalert2';
+import { useAuth } from '../contexts/AuthContext';
 
 const InventoryPage: React.FC = () => {
+    const { isViewer } = useAuth();
     const [currentDate, setCurrentDate] = useState(new Date());
     const [inventory, setInventory] = useState<Map<string, number>>(new Map());
     
@@ -70,7 +72,12 @@ const InventoryPage: React.FC = () => {
         <div className="space-y-6">
             <div className="bg-white p-5 rounded-xl shadow-md">
                 <div className="flex justify-between items-center flex-wrap gap-4">
-                    <h1 className="text-2xl font-bold text-slate-700">موجودی انبار</h1>
+                    <div className="flex items-center gap-3">
+                        <h1 className="text-2xl font-bold text-slate-700">موجودی انبار</h1>
+                        {isViewer && (
+                            <span className="text-xs font-bold px-2 py-1 rounded-full bg-amber-100 text-amber-700 border border-amber-200">فقط‌خواند</span>
+                        )}
+                    </div>
                     <div className="flex items-center space-x-2 space-x-reverse flex-wrap gap-2">
                         <label>موجودی لحظه‌ای در تاریخ:</label>
                         <DatePicker id="inventory-date-picker" value={currentDate} onChange={setCurrentDate} />
@@ -104,7 +111,9 @@ const InventoryPage: React.FC = () => {
                                                 {toPersianNumerals(stock.toLocaleString('fa-IR'))}
                                             </td>
                                             <td className="p-3">
-                                                <button onClick={() => handleAdjustInventory(product.id, product.name, stock)} className="bg-yellow-500 text-white px-3 py-1 text-xs rounded-lg hover:bg-yellow-600">اصلاح</button>
+                                                {!isViewer && (
+                                                    <button onClick={() => handleAdjustInventory(product.id, product.name, stock)} className="bg-yellow-500 text-white px-3 py-1 text-xs rounded-lg hover:bg-yellow-600">اصلاح</button>
+                                                )}
                                             </td>
                                         </tr>
                                     );

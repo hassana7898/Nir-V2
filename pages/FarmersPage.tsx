@@ -9,8 +9,10 @@ import BroodDetailsCard from '../components/BroodDetailsCard';
 import Modal from '../components/Modal';
 import DatePicker from '../components/DatePicker';
 import Swal from 'sweetalert2';
+import { useAuth } from '../contexts/AuthContext';
 
 const FarmersPage: React.FC = () => {
+    const { isViewer } = useAuth();
     const [farmers, setFarmers] = useState<Farmer[]>([]);
     const [selectedFarmer, setSelectedFarmer] = useState<Farmer | null>(null);
     const [allExits, setAllExits] = useState<Exit[]>([]);
@@ -260,11 +262,15 @@ const FarmersPage: React.FC = () => {
                         </div>
                    </div>
                    <div className="flex items-center gap-3 text-slate-500">
-                        <button onClick={(e) => { e.stopPropagation(); handleToggleFarmerVisibility(farmer.id); }} title={farmer.isHidden ? 'نمایش' : 'مخفی کردن'}>
-                            {farmer.isHidden ? <EyeSlashIcon className="w-5 h-5"/> : <EyeIcon className="w-5 h-5"/>}
-                        </button>
-                       <button onClick={(e) => {e.stopPropagation(); handleEditFarmer(farmer);}} className="text-xs text-blue-500 hover:font-bold">ویرایش</button>
-                       <button onClick={(e) => {e.stopPropagation(); handleDeleteFarmer(farmer);}} className="text-xs text-red-500 hover:font-bold">حذف</button>
+                        {!isViewer && (
+                            <>
+                                <button onClick={(e) => { e.stopPropagation(); handleToggleFarmerVisibility(farmer.id); }} title={farmer.isHidden ? 'نمایش' : 'مخفی کردن'}>
+                                    {farmer.isHidden ? <EyeSlashIcon className="w-5 h-5"/> : <EyeIcon className="w-5 h-5"/>}
+                                </button>
+                                <button onClick={(e) => {e.stopPropagation(); handleEditFarmer(farmer);}} className="text-xs text-blue-500 hover:font-bold">ویرایش</button>
+                                <button onClick={(e) => {e.stopPropagation(); handleDeleteFarmer(farmer);}} className="text-xs text-red-500 hover:font-bold">حذف</button>
+                            </>
+                        )}
                    </div>
                </div>
             </li>
@@ -344,15 +350,20 @@ const FarmersPage: React.FC = () => {
                             title="انتخاب همه"
                         />
                         <h2 className="text-xl font-bold text-slate-700">مرغداران</h2>
+                        {isViewer && (
+                            <span className="text-xs font-bold px-2 py-1 rounded-full bg-amber-100 text-amber-700 border border-amber-200">فقط‌خواند</span>
+                        )}
                     </div>
                     <div className="flex items-center gap-4">
-                        {selectedFarmerIdsForBulk.size > 0 && (
+                        {!isViewer && selectedFarmerIdsForBulk.size > 0 && (
                             <button onClick={handleBulkDeleteFarmers} className="text-xs text-red-500 hover:font-bold">حذف ({selectedFarmerIdsForBulk.size})</button>
                         )}
                         <button onClick={() => setShowHiddenFarmers(!showHiddenFarmers)} className="text-xs text-slate-600 hover:text-black">
                             {showHiddenFarmers ? 'نمایش فعال‌ها' : 'نمایش همه'}
                         </button>
-                        <button onClick={handleAddFarmer} className="bg-sky-500 text-white px-3 py-1 rounded-lg text-sm hover:bg-sky-600">+</button>
+                        {!isViewer && (
+                            <button onClick={handleAddFarmer} className="bg-sky-500 text-white px-3 py-1 rounded-lg text-sm hover:bg-sky-600">+</button>
+                        )}
                     </div>
                 </div>
                 <ul className="overflow-y-auto flex-grow">
@@ -365,7 +376,9 @@ const FarmersPage: React.FC = () => {
                     <div>
                          <div className="flex justify-between items-center mb-4">
                             <h2 className="text-2xl font-bold text-slate-800">{selectedFarmer.name}</h2>
-                            <button onClick={handleOpenAddBroodModal} className="bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600">ثبت دوره جوجه‌ریزی جدید</button>
+                            {!isViewer && (
+                                <button onClick={handleOpenAddBroodModal} className="bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600">ثبت دوره جوجه‌ریزی جدید</button>
+                            )}
                         </div>
                         <div className="space-y-4">
                             {selectedFarmer.broods.length === 0 ? (

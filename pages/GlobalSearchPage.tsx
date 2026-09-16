@@ -60,7 +60,7 @@ const GlobalSearchPage: React.FC = () => {
                         type="text"
                         value={query}
                         onChange={(e) => setQuery(e.target.value)}
-                        placeholder="جستجو در نام، محصول، راننده، شماره حواله، وزن..."
+                        placeholder="جستجو در نام، محصول، راننده، شماره حواله، وزن، توضیحات..."
                         className="w-full p-3 border rounded-lg text-lg focus:ring-2 focus:ring-sky-500 outline-none transition-all"
                         autoFocus
                     />
@@ -96,7 +96,7 @@ const GlobalSearchPage: React.FC = () => {
                             {debouncedQuery.trim() ? 'موردی با این مشخصات یافت نشد.' : 'برای شروع جستجو، عبارتی (مثل نام راننده یا وزن) را در کادر بالا وارد کنید.'}
                         </p>
                     ) : (
-                        <table className="w-full text-sm text-center border-collapse">
+                        <table className="w-full min-w-[1000px] text-sm text-center border-collapse">
                             <thead className="bg-slate-100 sticky top-0 z-10">
                                 <tr className="border-b-2 border-slate-200">
                                     <th className="p-3">تاریخ</th>
@@ -107,6 +107,7 @@ const GlobalSearchPage: React.FC = () => {
                                     <th className="p-3">وزن بارنامه (kg)</th>
                                     <th className="p-3">راننده</th>
                                     <th className="p-3">شماره حواله/بارنامه</th>
+                                    <th className="p-3">توضیحات</th>
                                     <th className="p-3">عملیات</th>
                                 </tr>
                             </thead>
@@ -115,6 +116,10 @@ const GlobalSearchPage: React.FC = () => {
                                     const isEntry = 'sellerName' in item;
                                     const entry = isEntry ? (item as Entry) : null;
                                     const exit = !isEntry ? (item as Exit) : null;
+                                    // Free-text («توضیحات»). Server column `notes` is shared by
+                                    // entry and exit rows; fall back to the exit sub-type.
+                                    // Defensive: never throws when the field is null/undefined.
+                                    const descriptionText = (((item as any).notes ?? '') || (exit?.productVariant ?? '')).toString().trim();
                                     return (
                                         <tr key={item.id} className="hover:bg-sky-50 transition-colors">
                                             <td className="p-3 whitespace-nowrap">{formatDate(item.date)}</td>
@@ -130,6 +135,7 @@ const GlobalSearchPage: React.FC = () => {
                                             <td className="p-3 text-slate-500">{isEntry ? toPersianNumerals((entry?.billWeight || 0).toLocaleString()) : '-'}</td>
                                             <td className="p-3">{item.driverName || '-'}</td>
                                             <td className="p-3 font-mono">{toPersianNumerals(entry?.billNumber || exit?.invoiceNumber || '')}</td>
+                                            <td className="p-3 text-slate-600 max-w-[220px] truncate" title={descriptionText}>{descriptionText || '-'}</td>
                                             <td className="p-3">
                                                 <button 
                                                     onClick={() => goToDate(item.date, isEntry ? 'entry' : 'exit')}

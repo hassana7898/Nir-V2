@@ -7,8 +7,10 @@ import { showToast } from '../utils/helpers';
 import { toPersianNumerals, formatToISODate } from '../utils/formatters';
 import Swal from 'sweetalert2';
 import DatePicker from '../components/DatePicker';
+import { useAuth } from '../contexts/AuthContext';
 
 const ProductionPage: React.FC = () => {
+    const { isViewer } = useAuth();
     const { settings, productMap } = useSettings();
     const [formulas, setFormulas] = useState<Formula[]>([]);
     
@@ -192,7 +194,12 @@ const ProductionPage: React.FC = () => {
     return (
         <div className="space-y-6">
             <div className="bg-white p-5 rounded-xl shadow-md">
-                <h1 className="text-2xl font-bold text-slate-700">مدیریت تولید</h1>
+                <div className="flex items-center gap-3">
+                    <h1 className="text-2xl font-bold text-slate-700">مدیریت تولید</h1>
+                    {isViewer && (
+                        <span className="text-xs font-bold px-2 py-1 rounded-full bg-amber-100 text-amber-700 border border-amber-200">فقط‌خواند</span>
+                    )}
+                </div>
                 <p className="text-sm text-slate-500 mt-1">در این بخش می‌توانید تولیدات روزانه را ثبت کرده و فرمول‌های ساخت را مدیریت کنید.</p>
             </div>
 
@@ -200,23 +207,26 @@ const ProductionPage: React.FC = () => {
                 <details open>
                     <summary className="text-xl font-bold text-slate-700 cursor-pointer">ثبت تولید دستی</summary>
                      <div className="mt-4 border-t pt-4 space-y-4">
-                        <div className="flex items-end gap-4">
-                            <div>
+                        {isViewer && <p className="text-xs text-slate-500">شما دسترسی فقط‌خواند دارید</p>}
+                        {!isViewer && (
+                        <div className="flex flex-col md:flex-row md:items-end gap-4">
+                            <div className="w-full">
                                 <label className="block text-sm font-medium text-slate-600">تاریخ تولید</label>
                                 <DatePicker id="production-date" value={productionDate} onChange={setProductionDate} />
                             </div>
-                             <div>
+                             <div className="w-full">
                                 <label className="block text-sm font-medium text-slate-600">محصول تولید شده</label>
                                 <select value={prodFinishedGood} onChange={e => setProdFinishedGood(e.target.value)} className="w-full p-2 border rounded-lg mt-1 h-11">
                                     {finishedGoods.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                                 </select>
                              </div>
-                              <div>
+                              <div className="w-full">
                                 <label className="block text-sm font-medium text-slate-600">مقدار تولید (kg)</label>
                                 <input type="number" value={prodQty} onChange={e => setProdQty(parseFloat(e.target.value) || 0)} className="w-full p-2 border rounded-lg mt-1 h-11" />
                              </div>
                              <button onClick={handleRecordProduction} className="bg-green-500 text-white px-6 py-2 rounded-lg hover:bg-green-600 h-11">ثبت تولید</button>
                         </div>
+                        )}
 
                          <div className="mt-4">
                             <h3 className="font-semibold text-slate-600">تولیدات ثبت شده در این روز:</h3>
@@ -238,8 +248,10 @@ const ProductionPage: React.FC = () => {
                  <details>
                     <summary className="text-xl font-bold text-slate-700 cursor-pointer">مدیریت فرمول‌های ساخت</summary>
                     <div className="mt-4 border-t pt-4">
+                        {isViewer && <p className="text-xs text-slate-500 mb-3">شما دسترسی فقط‌خواند دارید</p>}
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                             {/* Create/Edit formula */}
+                            {!isViewer && (
                              <div id="formula-form-section">
                                 <div className="flex justify-between items-center mb-4">
                                     <h2 className="text-lg font-bold text-slate-700">
@@ -272,7 +284,7 @@ const ProductionPage: React.FC = () => {
                                             مجموع مواد: {toPersianNumerals(ingredientsSum.toFixed(2))} / ۱۰۰۰ کیلوگرم
                                         </div>
                                     </div>
-                                    <div className="flex items-end gap-2 p-2 border-t">
+                                    <div className="flex flex-col md:flex-row md:items-end gap-2 p-2 border-t">
                                         <div className="flex-1">
                                             <label className="text-sm">ماده اولیه</label>
                                             <select value={selectedRawMaterial} onChange={e => setSelectedRawMaterial(e.target.value)} className="w-full p-2 border rounded-lg">
@@ -282,7 +294,7 @@ const ProductionPage: React.FC = () => {
                                                 }
                                             </select>
                                         </div>
-                                        <div style={{maxWidth: '200px'}}>
+                                        <div className="w-full md:w-[200px] md:min-w-[200px]">
                                             <label className="text-sm">مقدار برای ۱ تن تولید (kg)</label>
                                             <input type="number" value={rawMaterialQty} onChange={e => setRawMaterialQty(parseFloat(e.target.value) || 0)} className="w-full p-2 border rounded-lg" />
                                         </div>
@@ -294,6 +306,7 @@ const ProductionPage: React.FC = () => {
                                     </div>
                                 </div>
                             </div>
+                            )}
                              {/* Existing formulas */}
                              <div>
                                 <h2 className="text-lg font-bold text-slate-700 mb-4">فرمول‌های موجود</h2>
@@ -303,10 +316,12 @@ const ProductionPage: React.FC = () => {
                                          <div key={f.id} className="p-3 border rounded-lg">
                                             <div className="flex justify-between items-center">
                                                 <span className="font-semibold text-slate-800">{productMap.get(f.finishedGoodId)}</span>
-                                                <div className="flex gap-2">
-                                                    <button onClick={() => handleEditClick(f)} className="text-blue-500 hover:text-blue-700 text-sm font-semibold">ویرایش</button>
-                                                    <button onClick={() => handleDeleteFormula(f.id)} className="text-red-500 hover:text-red-700 text-sm font-semibold">حذف</button>
-                                                </div>
+                                                {!isViewer && (
+                                                    <div className="flex gap-2">
+                                                        <button onClick={() => handleEditClick(f)} className="text-blue-500 hover:text-blue-700 text-sm font-semibold">ویرایش</button>
+                                                        <button onClick={() => handleDeleteFormula(f.id)} className="text-red-500 hover:text-red-700 text-sm font-semibold">حذف</button>
+                                                    </div>
+                                                )}
                                             </div>
                                             <ul className="list-disc list-inside mt-2 text-sm text-slate-600">
                                                 {f.items.map(item => (

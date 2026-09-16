@@ -258,7 +258,7 @@ const ReportsPage: React.FC = () => {
     };
 
     const renderFlatTable = (data: Remittance[]) => (
-        <table className="w-full text-sm text-center">
+        <table className="w-full min-w-[1000px] whitespace-nowrap text-sm text-center">
             <thead className="bg-slate-100">
                 <tr>
                     <th className="p-2">تاریخ</th>
@@ -302,7 +302,7 @@ const ReportsPage: React.FC = () => {
     const renderGroupedResults = (data: GroupedResults) => (
         <div className="space-y-6">
             {Array.from(data.entries()).map(([groupKey, groupData]) => (
-                <div key={groupKey} className="border rounded-lg overflow-hidden">
+                <div key={groupKey} className="border rounded-lg">
                     <div className="bg-slate-100 p-3">
                         <h3 className="text-lg font-bold text-slate-800">{groupKey}</h3>
                         <div className="text-xs text-slate-600 mt-1">

@@ -112,7 +112,7 @@ const InventoryAnalysisPage: React.FC = () => {
                         <button onClick={() => handlePrint('analysis', reportData, { startDate, endDate })} className="no-print bg-emerald-500 text-white px-4 py-2 rounded-lg hover:bg-emerald-600 transition-colors">چاپ گزارش</button>
                      </div>
                      <div className="overflow-x-auto">
-                        <table id="analysis-table" className="w-full text-sm text-center">
+                        <table id="analysis-table" className="w-full min-w-[820px] whitespace-nowrap text-sm text-center">
                             <thead className="bg-slate-100">
                                 <tr>
                                     <th className="p-2" rowSpan={2}>نام محصول</th>

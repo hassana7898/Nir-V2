@@ -11,7 +11,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { securityHeaders } from "./server/middleware/security";
 import { corsMiddleware } from "./server/middleware/cors";
 import { apiRateLimiter, authRateLimiter } from "./server/middleware/rateLimit";
-import { requireAuth } from "./server/middleware/auth";
+import { requireAuth, blockViewerWrites } from "./server/middleware/auth";
 
 import authRouter from "./server/routes/auth";
 import settingsRouter from "./server/routes/settings";
@@ -28,6 +28,7 @@ import syncRouter from "./server/routes/sync";
 import backupRouter from "./server/routes/backup";
 import { restoreLegacySnapshot } from "./server/services/legacyImport";
 import uploadRouter from "./server/routes/uploads";
+import { startBackupScheduler } from "./server/scheduler";
 
 export const app = express();
 
@@ -78,19 +79,19 @@ app.get("/api/health", async (_req, res) => {
 app.use("/api/auth", authRateLimiter, authRouter);
 
 // -------------------------------------------------- authenticated business APIs
-app.use("/api/settings", apiRateLimiter, requireAuth, settingsRouter);
-app.use("/api/farmers", apiRateLimiter, requireAuth, farmersRouter);
-app.use("/api/drivers", apiRateLimiter, requireAuth, driversRouter);
-app.use("/api/origins", apiRateLimiter, requireAuth, originsRouter);
-app.use("/api/invoices", apiRateLimiter, requireAuth, invoicesRouter);
-app.use("/api/inventory", apiRateLimiter, requireAuth, inventoryRouter);
-app.use("/api/production", apiRateLimiter, requireAuth, productionRouter);
-app.use("/api/formulas", apiRateLimiter, requireAuth, formulasRouter);
-app.use("/api/warehouses", apiRateLimiter, requireAuth, warehousesRouter);
-app.use("/api/users", apiRateLimiter, requireAuth, usersRouter);
-app.use("/api/sync", apiRateLimiter, requireAuth, syncRouter);
-app.use("/api/backup", apiRateLimiter, requireAuth, backupRouter);
-app.use("/api/uploads", apiRateLimiter, requireAuth, uploadRouter);
+app.use("/api/settings", apiRateLimiter, requireAuth, blockViewerWrites, settingsRouter);
+app.use("/api/farmers", apiRateLimiter, requireAuth, blockViewerWrites, farmersRouter);
+app.use("/api/drivers", apiRateLimiter, requireAuth, blockViewerWrites, driversRouter);
+app.use("/api/origins", apiRateLimiter, requireAuth, blockViewerWrites, originsRouter);
+app.use("/api/invoices", apiRateLimiter, requireAuth, blockViewerWrites, invoicesRouter);
+app.use("/api/inventory", apiRateLimiter, requireAuth, blockViewerWrites, inventoryRouter);
+app.use("/api/production", apiRateLimiter, requireAuth, blockViewerWrites, productionRouter);
+app.use("/api/formulas", apiRateLimiter, requireAuth, blockViewerWrites, formulasRouter);
+app.use("/api/warehouses", apiRateLimiter, requireAuth, blockViewerWrites, warehousesRouter);
+app.use("/api/users", apiRateLimiter, requireAuth, blockViewerWrites, usersRouter);
+app.use("/api/sync", apiRateLimiter, requireAuth, blockViewerWrites, syncRouter);
+app.use("/api/backup", apiRateLimiter, requireAuth, blockViewerWrites, backupRouter);
+app.use("/api/uploads", apiRateLimiter, requireAuth, blockViewerWrites, uploadRouter);
 
 // ---------------------------------------------------------------- AI extraction
 let ai: GoogleGenAI | null = null;
@@ -252,6 +253,17 @@ async function startServer() {
   }
 
   app.use(errorHandler);
+
+  // Backup scheduler: start once during boot. A failure to start the scheduler must
+  // never crash the server, so it is fully guarded. Skipped under NODE_ENV=test.
+  if (process.env.NODE_ENV !== 'test') {
+    try {
+      startBackupScheduler();
+      console.log('[NIR] Backup scheduler started.');
+    } catch (err) {
+      console.error('[NIR] Failed to start backup scheduler (continuing):', err);
+    }
+  }
 
   app.listen(PORT, HOST, () => console.log(`[NIR] Server running on http://${HOST}:${PORT}`));
 }

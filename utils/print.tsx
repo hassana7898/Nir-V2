@@ -597,6 +597,8 @@ const PrintReportLayout: React.FC<{ data: Remittance[] | GroupedResults; options
 
 
 let printRootInstance: ReturnType<typeof createRoot> | null = null;
+let printTimer: ReturnType<typeof setTimeout> | null = null;
+let afterprintArmed = false;
 const performCleanup = () => {
     if (printRootInstance) { try { printRootInstance.unmount(); } catch (e) {} finally { printRootInstance = null; } }
     const printRoot = document.getElementById('print-root');
@@ -606,7 +608,8 @@ const performCleanup = () => {
     const customStyle = document.getElementById('custom-print-style');
     if (customStyle) customStyle.remove();
 };
-window.addEventListener('afterprint', performCleanup);
+const onAfterPrint = () => { afterprintArmed = false; if (printTimer) { clearTimeout(printTimer); printTimer = null; } performCleanup(); };
+if (!afterprintArmed) { window.addEventListener('afterprint', onAfterPrint); afterprintArmed = true; }
 
 type PrintOptions = { pageSettings?: { title?: string, description?: string }[]; printDate?: Date; startDate?: Date; endDate?: Date; reportSummary?: any; groupBy?: string; farmer?: Farmer; brood?: Brood; generalDescription?: string; customPrintTitle?: string; showPageTotals?: boolean; showGrandTotal?: boolean; };
 
@@ -634,9 +637,16 @@ export const handlePrint = (type: 'entry' | 'exit' | 'analysis' | 'report' | 'br
     printRootInstance = createRoot(printRoot);
     printRootInstance.render(<React.StrictMode>{componentToRender}</React.StrictMode>);
 
-    setTimeout(() => {
+    if (printTimer) clearTimeout(printTimer);
+    printTimer = setTimeout(() => {
+        printTimer = null;
         if (settings.factoryLogo) document.documentElement.style.setProperty('--watermark-url', `url(${settings.factoryLogo})`);
         if (type === 'analysis' || settings.printBoldText) document.body.classList.add('bold-print');
-        window.print();
+        try {
+            window.print();
+        } finally {
+            // Safety net for environments that never emit 'afterprint'.
+            setTimeout(() => { if (printRootInstance) performCleanup(); }, 5000);
+        }
     }, 250);
 };

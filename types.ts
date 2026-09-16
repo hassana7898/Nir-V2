@@ -25,6 +25,7 @@ export interface Entry {
     driverIBAN: string;
     createdAt: number; // timestamp
     isPageBreak?: boolean;
+    notes?: string;
 }
 
 export interface ExceptionalFeed {
@@ -69,6 +70,7 @@ export interface Exit {
     isCrumble?: boolean; // New field for Crumble checkbox
     createdAt: number; // timestamp
     isPageBreak?: boolean;
+    notes?: string;
 }
 
 export type Remittance = Entry | Exit;

@@ -12,11 +12,13 @@ import Swal from 'sweetalert2';
 import Sortable from 'sortablejs';
 import DataImportModal from '../components/DataImportModal';
 import ImageImportModal from '../components/ImageImportModal';
+import { useAuth } from '../contexts/AuthContext';
 
 type SortableKeys = keyof Exit | 'farmerId' | 'productId';
 type SortConfigItem = { key: SortableKeys; direction: 'asc' | 'desc' };
 
 const ExitPage: React.FC = () => {
+    const { isViewer } = useAuth();
     const [currentDate, setCurrentDate] = useState(() => {
         const saved = sessionStorage.getItem('targetDate');
         if (saved) {
@@ -61,7 +63,7 @@ const ExitPage: React.FC = () => {
 
     const initialFormState = { 
         farmerId: '', productId: settings.products.find(p => p.type === 'finishedGood')?.id || settings.products[0]?.id || '', 
-        weight: 0, driverName: '', invoiceNumber: '', productVariant: '', isCrumble: false
+        weight: 0, driverName: '', invoiceNumber: '', productVariant: '', isCrumble: false, notes: ''
     };
 
     const [formData, setFormData] = useState(initialFormState);
@@ -158,7 +160,7 @@ const ExitPage: React.FC = () => {
                     if (aName < bName) return -1;
                     if (aName > bName) return 1;
                 }
-                return a.createdAt - b.createdAt;
+                return dataService.createdMs(a) - dataService.createdMs(b);
             });
         }
         return result;
@@ -194,6 +196,12 @@ const ExitPage: React.FC = () => {
                 },
             });
         }
+        return () => {
+            if (sortableInstance.current) {
+                sortableInstance.current.destroy();
+                sortableInstance.current = null;
+            }
+        };
     }, [filteredExits, debouncedSearchTerm, pageBreakMode, sortConfig]);
 
     const handleSaveOrder = async () => {
@@ -314,7 +322,8 @@ const ExitPage: React.FC = () => {
             driverName: e.driverName || '', 
             invoiceNumber: e.invoiceNumber || '',
             productVariant: e.productVariant || '',
-            isCrumble: e.isCrumble || false
+            isCrumble: e.isCrumble || false,
+            notes: e.notes ?? ''
         });
         setEditMode({ active: true, id: e.id });
         setIsFormVisible(true);
@@ -362,7 +371,12 @@ const ExitPage: React.FC = () => {
 
             <div className="bg-white p-5 rounded-xl shadow-md">
                 <div className="flex justify-between items-center mb-4 flex-wrap gap-4">
-                    <h1 className="text-2xl font-bold text-slate-700">مدیریت حواله‌های خروج</h1>
+                    <div className="flex items-center gap-3">
+                        <h1 className="text-2xl font-bold text-slate-700">مدیریت حواله‌های خروج</h1>
+                        {isViewer && (
+                            <span className="text-xs font-bold px-2 py-1 rounded-full bg-amber-100 text-amber-700 border border-amber-200">فقط‌خواند</span>
+                        )}
+                    </div>
                     <div className="flex items-center space-x-2 space-x-reverse flex-wrap gap-2">
                         <input type="text" placeholder="جستجو..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="p-2 border rounded-lg w-32" />
                         <div className="flex items-center gap-2 bg-slate-100 p-1 px-2 rounded-lg border border-slate-200">
@@ -371,9 +385,13 @@ const ExitPage: React.FC = () => {
                              <span className="text-sm font-bold text-sky-700 whitespace-nowrap min-w-[120px] text-center">{formatDateWithWeekday(currentDate)}</span>
                              <button onClick={() => setCurrentDate(prev => { const d = new Date(prev); d.setDate(d.getDate() - 1); return d; })} className="px-2 py-1 bg-slate-200 hover:bg-slate-300 rounded text-slate-600 font-bold" title="روز قبل" type="button">{'>'}</button>
                         </div>
-                        <button onClick={() => { setFormData({ ...initialFormState, productId: settings.products.find(p => p.type === 'finishedGood')?.id || '' }); setEditMode({ active: false, id: null }); setIsFormVisible(!isFormVisible); if(!isFormVisible) setTimeout(() => firstInputRef.current?.focus(), 100); }} className="bg-sky-500 text-white px-4 py-2 rounded-lg">افزودن</button>
-                        <button onClick={() => setIsImageImportModalOpen(true)} className="bg-pink-600 text-white px-4 py-2 rounded-lg" title="وارد کردن از تصویر (AI)">پردازش تصویر هوش مصنوعی</button>
-                        {selectedIds.size > 0 && (
+                        {!isViewer && (
+                            <button onClick={() => { setFormData({ ...initialFormState, productId: settings.products.find(p => p.type === 'finishedGood')?.id || '' }); setEditMode({ active: false, id: null }); setIsFormVisible(!isFormVisible); if(!isFormVisible) setTimeout(() => firstInputRef.current?.focus(), 100); }} className="bg-sky-500 text-white px-4 py-2 rounded-lg">افزودن</button>
+                        )}
+                        {!isViewer && (
+                            <button onClick={() => setIsImageImportModalOpen(true)} className="bg-pink-600 text-white px-4 py-2 rounded-lg" title="وارد کردن از تصویر (AI)">پردازش تصویر هوش مصنوعی</button>
+                        )}
+                        {!isViewer && selectedIds.size > 0 && (
                             <>
                                 <button onClick={() => { setBulkMoveTargetDate(currentDate); setIsBulkMoveModalOpen(true); }} className="bg-orange-600 text-white px-4 py-2 rounded-lg text-sm shadow-md animate-pulse">انتقال ({toPersianNumerals(selectedIds.size)})</button>
                                 <button onClick={() => {
@@ -388,19 +406,23 @@ const ExitPage: React.FC = () => {
                                 }} className="bg-red-600 text-white px-4 py-2 rounded-lg text-sm shadow-md">حذف ({toPersianNumerals(selectedIds.size)})</button>
                             </>
                         )}
-                        <button 
-                            disabled={!!searchTerm}
-                            onClick={handleSaveOrder} 
-                            className={`px-4 py-2 rounded-lg text-sm transition-all ${hasUnsavedChanges && !searchTerm ? 'bg-orange-500 text-white scale-105 shadow-lg' : 'bg-slate-200 text-slate-500'}`}
-                        >
-                            ذخیره ترتیب
-                        </button>
+                        {!isViewer && (
+                            <button 
+                                disabled={!!searchTerm}
+                                onClick={handleSaveOrder} 
+                                className={`px-4 py-2 rounded-lg text-sm transition-all ${hasUnsavedChanges && !searchTerm ? 'bg-orange-500 text-white scale-105 shadow-lg' : 'bg-slate-200 text-slate-500'}`}
+                            >
+                                ذخیره ترتیب
+                            </button>
+                        )}
                         {sortConfig.length > 0 && (
                             <button onClick={() => setSortConfig([])} className="px-4 py-2 rounded-lg text-sm bg-red-100 text-red-600 hover:bg-red-200">
                                 لغو مرتب‌سازی
                             </button>
                         )}
-                        <button onClick={() => setPageBreakMode(!pageBreakMode)} className={`px-4 py-2 rounded-lg text-sm ${pageBreakMode ? 'bg-red-500 text-white' : 'bg-slate-200'}`}>تعیین صفحه</button>
+                        {!isViewer && (
+                            <button onClick={() => setPageBreakMode(!pageBreakMode)} className={`px-4 py-2 rounded-lg text-sm ${pageBreakMode ? 'bg-red-500 text-white' : 'bg-slate-200'}`}>تعیین صفحه</button>
+                        )}
                         <button onClick={() => setIsPrintModalOpen(true)} className="bg-emerald-500 text-white px-4 py-2 rounded-lg text-sm">چاپ</button>
                     </div>
                 </div>
@@ -489,7 +511,7 @@ const ExitPage: React.FC = () => {
                 </div>
             )}
 
-            {isFormVisible && (
+            {isFormVisible && !isViewer && (
                 <form className="bg-white p-5 rounded-xl shadow-md space-y-4" onSubmit={handleSave}>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <div className="flex items-end gap-2">
@@ -539,6 +561,10 @@ const ExitPage: React.FC = () => {
                             </div>
                         </div>
                     </div>
+                    <div className="border-t pt-4">
+                        <label className="block text-xs font-bold text-slate-500 mb-1">توضیحات</label>
+                        <input onKeyDown={handleKeyDown} placeholder="توضیحات (اختیاری)" value={formData.notes || ''} onChange={e => setFormData({...formData, notes: e.target.value})} className="w-full p-2 border rounded-lg" />
+                    </div>
                     <div className="flex justify-end gap-2 border-t pt-4">
                         <button type="submit" className="bg-green-500 text-white px-8 py-2 rounded-lg font-bold">ذخیره (Enter)</button>
                         <button type="button" onClick={() => setIsFormVisible(false)} className="bg-gray-400 text-white px-8 py-2 rounded-lg">انصراف</button>
@@ -551,7 +577,7 @@ const ExitPage: React.FC = () => {
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
                     برای مرتب‌سازی چند سطحی، کلید Shift را نگه دارید و روی سرستون‌ها کلیک کنید.
                 </div>
-                <table className="w-full text-sm text-center border-collapse border border-slate-800">
+                <table className="w-full min-w-[760px] whitespace-nowrap text-sm text-center border-collapse border border-slate-800">
                     <thead className="bg-slate-100 font-bold text-slate-800">
                         <tr>
                             <th className="p-2 border border-slate-400 no-print w-10">
@@ -595,9 +621,13 @@ const ExitPage: React.FC = () => {
                                     <td className="p-2 border border-slate-400 font-bold text-lg text-slate-900">{toPersianNumerals(e.invoiceNumber)}</td>
                                     <td className="p-2 border border-slate-400 no-print">
                                         <div className="flex gap-2 justify-center">
-                                            <button onClick={(ev) => { ev.stopPropagation(); startEditing(e); }} className="text-blue-600 hover:font-bold">ویرایش</button>
-                                            <button onClick={(ev) => { ev.stopPropagation(); handleSingleMove(e.id); }} className="text-orange-600 hover:font-bold">انتقال</button>
-                                            <button onClick={(ev) => { ev.stopPropagation(); Swal.fire({ title: 'حذف حواله؟', icon: 'warning', showCancelButton: true }).then(async (r:any) => { if (r.isConfirmed) { await dataService.deleteInvoice(e.id); fetchExits(); } }); }} className="text-red-500 hover:font-bold">حذف</button>
+                                            {!isViewer && (
+                                                <>
+                                                    <button onClick={(ev) => { ev.stopPropagation(); startEditing(e); }} className="text-blue-600 hover:font-bold">ویرایش</button>
+                                                    <button onClick={(ev) => { ev.stopPropagation(); handleSingleMove(e.id); }} className="text-orange-600 hover:font-bold">انتقال</button>
+                                                    <button onClick={(ev) => { ev.stopPropagation(); Swal.fire({ title: 'حذف حواله؟', icon: 'warning', showCancelButton: true }).then(async (r:any) => { if (r.isConfirmed) { await dataService.deleteInvoice(e.id); fetchExits(); } }); }} className="text-red-500 hover:font-bold">حذف</button>
+                                                </>
+                                            )}
                                         </div>
                                     </td>
                                 </tr>

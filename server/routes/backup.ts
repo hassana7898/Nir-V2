@@ -1,7 +1,7 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
-import { backupDatabase, exportSnapshot, restoreDatabase, restoreLegacySnapshot, isLegacySnapshot } from '../services/backup';
+import { backupDatabase, exportSnapshot, restoreDatabase, restoreLegacySnapshot, isLegacySnapshot, listAutoBackups, restoreFromServerFile } from '../services/backup';
 import { requireRole } from '../middleware/auth';
 
 const router = express.Router();
@@ -103,5 +103,38 @@ const handleLegacyRestore = async (req: any, res: any) => {
 
 router.post('/restore-legacy', requireRole('ADMIN'), handleLegacyRestore);
 router.post('/import-legacy', requireRole('ADMIN'), handleLegacyRestore);
+
+// GET /api/backup/server-list - List scheduled backups on the server (newest first)
+router.get('/server-list', requireRole('ADMIN'), (_req, res) => {
+  try {
+    res.json({ success: true, files: listAutoBackups() });
+  } catch (error: any) {
+    console.error('Backup list error:', error);
+    res.status(500).json({ error: error.message || 'Failed to list backups.' });
+  }
+});
+
+// POST /api/backup/restore-server-file - 1-click restore from a server-side backup file
+router.post('/restore-server-file', requireRole('ADMIN'), async (req, res) => {
+  const filename = String(req.body?.filename ?? '').trim();
+  const safeName = path.basename(filename);
+  if (!safeName || !/^auto-backup-.*\.json$/.test(safeName)) {
+    return res.status(400).json({ error: 'نام فایل پشتیبان نامعتبر است.' });
+  }
+
+  try {
+    const result = await restoreFromServerFile(safeName);
+    res.json({
+      success: true,
+      restoredTables: result.restoredTables,
+      verifiedCounts: result.verifiedCounts,
+      skippedTables: result.skippedTables,
+      totalRows: result.totalRows,
+    });
+  } catch (error: any) {
+    console.error('Server-file restore error:', error);
+    res.status(500).json({ error: error.message || 'Restore failed.' });
+  }
+});
 
 export default router;

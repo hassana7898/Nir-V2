@@ -1,11 +1,11 @@
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useSettings } from '../contexts/SettingsContext';
 import { Settings, Product, Farmer, ProductType } from '../types';
 import { showToast, fileToBase64 } from '../utils/helpers';
 import * as dataService from '../services/dataService';
 import * as authService from '../services/authService';
-import { toPersianNumerals } from '../utils/formatters';
+import { toPersianNumerals, formatDate } from '../utils/formatters';
 import { useAuth } from '../contexts/AuthContext';
 import Swal from 'sweetalert2';
 import Sortable from 'sortablejs';
@@ -16,9 +16,16 @@ const DragHandleIcon = (props: React.SVGProps<SVGSVGElement>) => (
     </svg>
 );
 
+const formatBytes = (bytes: number): string => {
+    const b = Number(bytes) || 0;
+    if (b < 1024) return toPersianNumerals(`${b} بایت`);
+    if (b < 1024 * 1024) return toPersianNumerals(`${(b / 1024).toFixed(1)} کیلوبایت`);
+    return toPersianNumerals(`${(b / (1024 * 1024)).toFixed(1)} مگابایت`);
+};
+
 const SettingsPage: React.FC = () => {
     const { settings: initialSettings, saveSettings: saveSettingsContext, loadSettings } = useSettings();
-    const { logout } = useAuth();
+    const { logout, isAdmin } = useAuth();
     const [formState, setFormState] = useState<Settings>(initialSettings);
     const [logoPreview, setLogoPreview] = useState<string | null>(initialSettings.factoryLogo);
     const productListRef = useRef<HTMLDivElement>(null);
@@ -49,6 +56,18 @@ const SettingsPage: React.FC = () => {
     const [currentPassword, setCurrentPassword] = useState('');
     const [newPassword, setNewPassword] = useState('');
     const [confirmPassword, setConfirmPassword] = useState('');
+
+    // State for two-factor authentication (امنیت)
+    const [twoFactorEnabled, setTwoFactorEnabled] = useState<boolean | null>(null);
+    const [twoFactorSetup, setTwoFactorSetup] = useState<authService.TwoFactorSetup | null>(null);
+    const [twoFactorCode, setTwoFactorCode] = useState('');
+    const [twoFactorDisablePassword, setTwoFactorDisablePassword] = useState('');
+    const [twoFactorBusy, setTwoFactorBusy] = useState(false);
+
+    // State for server-side automatic backups (ADMIN only)
+    const [serverBackups, setServerBackups] = useState<authService.ServerBackupFile[]>([]);
+    const [serverBackupsLoading, setServerBackupsLoading] = useState(false);
+    const [restoringFile, setRestoringFile] = useState<string | null>(null);
 
 
     const finishedGoods = useMemo(() => {
@@ -565,8 +584,8 @@ const SettingsPage: React.FC = () => {
 
     const handleChangePassword = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (newPassword.length < 4) {
-            showToast('رمز عبور جدید باید حداقل ۴ کاراکتر باشد.', 'error');
+        if (newPassword.length < 6) {
+            showToast('رمز عبور جدید باید حداقل ۶ کاراکتر باشد.', 'error');
             return;
         }
         if (newPassword !== confirmPassword) {
@@ -574,17 +593,149 @@ const SettingsPage: React.FC = () => {
             return;
         }
 
-        const isVerified = await authService.verifyPassword(currentPassword);
-        if (!isVerified) {
-            showToast('رمز عبور فعلی اشتباه است.', 'error');
+        try {
+            const res = await authService.changePassword(currentPassword, newPassword);
+            if (!res.ok) {
+                showToast(res.error || 'تغییر رمز عبور ناموفق بود.', 'error');
+                return;
+            }
+            showToast('رمز عبور با موفقیت تغییر کرد.');
+            setCurrentPassword('');
+            setNewPassword('');
+            setConfirmPassword('');
+        } catch {
+            showToast('تغییر رمز عبور ناموفق بود.', 'error');
+        }
+    };
+
+    // --- Two-factor authentication (امنیت) ---
+    const refreshTwoFactorStatus = useCallback(async () => {
+        try {
+            setTwoFactorEnabled(await authService.twoFactorStatus());
+        } catch {
+            setTwoFactorEnabled(null);
+        }
+    }, []);
+
+    const handleTwoFactorGenerate = async () => {
+        setTwoFactorBusy(true);
+        try {
+            const setup = await authService.twoFactorGenerate();
+            setTwoFactorSetup(setup);
+            setTwoFactorCode('');
+        } catch (err: any) {
+            showToast(err?.message || 'تولید کلید دو مرحله‌ای ناموفق بود.', 'error');
+        } finally {
+            setTwoFactorBusy(false);
+        }
+    };
+
+    const handleTwoFactorVerify = async () => {
+        if (!/^\d{6}$/.test(twoFactorCode)) {
+            showToast('کد تأیید باید ۶ رقم باشد.', 'warning');
             return;
         }
+        setTwoFactorBusy(true);
+        try {
+            const res = await authService.twoFactorVerify(twoFactorCode);
+            if (!res.ok) {
+                showToast(res.error || 'کد تأیید نادرست است.', 'error');
+                return;
+            }
+            showToast('ورود دو مرحله‌ای با موفقیت فعال شد.');
+            setTwoFactorSetup(null);
+            setTwoFactorCode('');
+            await refreshTwoFactorStatus();
+        } finally {
+            setTwoFactorBusy(false);
+        }
+    };
 
-        await authService.setPassword(newPassword);
-        showToast('رمز عبور با موفقیت تغییر کرد.');
-        setCurrentPassword('');
-        setNewPassword('');
-        setConfirmPassword('');
+    const handleTwoFactorDisable = async () => {
+        if (!twoFactorDisablePassword) {
+            showToast('برای غیرفعال‌سازی، رمز عبور خود را وارد کنید.', 'warning');
+            return;
+        }
+        setTwoFactorBusy(true);
+        try {
+            const res = await authService.twoFactorDisable(twoFactorDisablePassword);
+            if (!res.ok) {
+                showToast(res.error || 'غیرفعال‌سازی ناموفق بود.', 'error');
+                return;
+            }
+            showToast('ورود دو مرحله‌ای غیرفعال شد.');
+            setTwoFactorDisablePassword('');
+            await refreshTwoFactorStatus();
+        } finally {
+            setTwoFactorBusy(false);
+        }
+    };
+
+    // --- Server automatic backups (ADMIN only) ---
+    const refreshServerBackups = useCallback(async () => {
+        if (!isAdmin) return;
+        setServerBackupsLoading(true);
+        try {
+            setServerBackups(await authService.listServerBackups());
+        } catch (err: any) {
+            showToast(err?.message || 'دریافت لیست پشتیبان‌ها ناموفق بود.', 'error');
+            setServerBackups([]);
+        } finally {
+            setServerBackupsLoading(false);
+        }
+    }, [isAdmin]);
+
+    // Load the current 2FA state once on mount (available to admin and viewer alike).
+    useEffect(() => {
+        void refreshTwoFactorStatus();
+    }, [refreshTwoFactorStatus]);
+
+    // Load the server-side automatic backups for admins only.
+    useEffect(() => {
+        if (isAdmin) void refreshServerBackups();
+    }, [isAdmin, refreshServerBackups]);
+
+    const handleRestoreServerBackup = async (file: authService.ServerBackupFile) => {
+        const result = await Swal.fire({
+            title: 'هشدار: بازیابی از پشتیبان سرور',
+            html: `
+                <div class="text-right" dir="rtl">
+                    <p class="mb-2">شما در حال بازیابی داده‌های زنده سامانه از فایل زیر هستید:</p>
+                    <p class="mb-2 font-bold text-red-600" dir="ltr">${file.name}</p>
+                    <p class="mb-2"><strong>تمام اطلاعات فعلی (حواله‌ها، مرغداران، محصولات، انبار و ...) با محتوای این فایل جایگزین می‌شود.</strong></p>
+                    <p><strong>این عملیات غیرقابل بازگشت است.</strong></p>
+                </div>
+            `,
+            icon: 'warning',
+            showCancelButton: true,
+            confirmButtonColor: '#d33',
+            cancelButtonColor: '#6b7280',
+            confirmButtonText: 'بله، داده‌های زنده را بازنویسی کن',
+            cancelButtonText: 'انصراف',
+            focusCancel: true,
+        });
+        if (!result.isConfirmed) return;
+
+        setRestoringFile(file.name);
+        try {
+            const res = await authService.restoreServerBackup(file.name);
+            if (!res.ok) {
+                Swal.fire('خطا', res.error || 'بازیابی پشتیبان ناموفق بود.', 'error');
+                return;
+            }
+            Swal.fire({
+                title: 'موفق',
+                text: 'داده‌ها با موفقیت بازیابی شد. برنامه مجددا بارگذاری می‌شود...',
+                icon: 'success',
+                timer: 2000,
+                timerProgressBar: true,
+                showConfirmButton: false,
+            }).then(() => window.location.reload());
+        } catch {
+            Swal.fire('خطا', 'بازیابی پشتیبان ناموفق بود.', 'error');
+        } finally {
+            setRestoringFile(null);
+        }
     };
 
     
@@ -638,23 +789,23 @@ const SettingsPage: React.FC = () => {
                     <h3 className="text-lg font-semibold text-slate-600 border-b pb-2 mb-3">مدیریت و ترتیب محصولات</h3>
                     <div ref={productListRef} className="space-y-2">
                         {formState.products.filter(p => !p.isDeleted).map((product, index) => (
-                            <div key={product.id} className="grid grid-cols-12 gap-2 items-center">
-                                <div className="col-span-1 flex justify-center items-center cursor-grab drag-handle text-slate-400 hover:text-slate-700">
+                            <div key={product.id} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-center">
+                                <div className="col-span-12 md:col-span-1 flex justify-center items-center cursor-grab drag-handle text-slate-400 hover:text-slate-700">
                                     <DragHandleIcon className="w-5 h-5" />
                                 </div>
-                                <div className="col-span-5 p-2 border rounded-lg bg-slate-50 flex justify-between items-center">
+                                <div className="col-span-12 md:col-span-5 p-2 border rounded-lg bg-slate-50 flex justify-between items-center">
                                     <span>{product.name}</span>
                                     <button onClick={() => handleEditProduct(product)} className="text-sky-500 hover:text-sky-700 text-sm">ویرایش</button>
                                 </div>
                                 <select 
                                     value={product.type} 
                                     onChange={e => handleProductTypeChange(product.id, e.target.value as ProductType)}
-                                    className="col-span-4 p-2 border rounded-lg"
+                                    className="col-span-12 md:col-span-4 p-2 border rounded-lg"
                                 >
                                     <option value="rawMaterial">ماده اولیه</option>
                                     <option value="finishedGood">محصول نهایی</option>
                                 </select>
-                                <button onClick={() => handleRemoveProduct(product.id)} className="col-span-2 bg-red-500 text-white p-2 rounded-lg hover:bg-red-600">حذف</button>
+                                <button onClick={() => handleRemoveProduct(product.id)} className="col-span-12 md:col-span-2 bg-red-500 text-white p-2 rounded-lg hover:bg-red-600">حذف</button>
                             </div>
                         ))}
                     </div>
@@ -759,23 +910,85 @@ const SettingsPage: React.FC = () => {
                 </div>
 
                  <div className="border-t pt-6 mt-6">
-                    <h3 className="text-lg font-semibold text-slate-600 border-b pb-2 mb-3">مدیریت حساب کاربری</h3>
+                    <h3 className="text-lg font-semibold text-slate-600 border-b pb-2 mb-3">تغییر رمز عبور</h3>
                     <div className="max-w-md mx-auto">
                         <form onSubmit={handleChangePassword} className="space-y-4">
                             <div>
                                 <label className="block text-sm mb-1">رمز عبور فعلی</label>
-                                <input type="password" value={currentPassword} onChange={e => setCurrentPassword(e.target.value)} className="w-full p-2 border rounded-lg" required />
+                                <input type="password" value={currentPassword} onChange={e => setCurrentPassword(e.target.value)} className="w-full p-3 border rounded-lg min-h-[44px]" required />
                             </div>
                             <div>
                                 <label className="block text-sm mb-1">رمز عبور جدید</label>
-                                <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} className="w-full p-2 border rounded-lg" required />
+                                <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} className="w-full p-3 border rounded-lg min-h-[44px]" required />
                             </div>
                             <div>
                                 <label className="block text-sm mb-1">تکرار رمز عبور جدید</label>
-                                <input type="password" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} className="w-full p-2 border rounded-lg" required />
+                                <input type="password" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} className="w-full p-3 border rounded-lg min-h-[44px]" required />
                             </div>
                             <button type="submit" className="w-full bg-indigo-500 text-white px-4 py-2 rounded-lg hover:bg-indigo-600">تغییر رمز عبور</button>
                         </form>
+                    </div>
+                </div>
+
+                <div className="border-t pt-6 mt-6">
+                    <h3 className="text-lg font-semibold text-slate-600 border-b pb-2 mb-3">امنیت</h3>
+                    <div className="max-w-xl mx-auto space-y-4">
+                        <div className="flex items-center justify-between bg-slate-50 border rounded-lg p-3">
+                            <span className="text-sm font-medium text-slate-700">ورود دو مرحله‌ای (2FA)</span>
+                            <span className={`text-sm font-bold ${twoFactorEnabled ? 'text-green-600' : 'text-slate-500'}`}>
+                                {twoFactorEnabled === null ? 'در حال بررسی...' : twoFactorEnabled ? 'فعال' : 'غیرفعال'}
+                            </span>
+                        </div>
+
+                        {twoFactorEnabled === false && (
+                            !twoFactorSetup ? (
+                                <button
+                                    onClick={handleTwoFactorGenerate}
+                                    disabled={twoFactorBusy}
+                                    className="w-full bg-sky-500 text-white px-4 py-2 rounded-lg hover:bg-sky-600 disabled:bg-sky-300"
+                                >
+                                    {twoFactorBusy ? 'در حال تولید...' : 'فعال‌سازی ورود دو مرحله‌ای'}
+                                </button>
+                            ) : (
+                                <div className="space-y-3 p-4 border rounded-lg bg-slate-50">
+                                    <p className="text-sm text-slate-600">۱) کد QR زیر را با اپلیکیشن احراز هویت (Google Authenticator) اسکن کنید:</p>
+                                    {twoFactorSetup.qrDataUrl && (
+                                        <img src={twoFactorSetup.qrDataUrl} alt="کد QR دو مرحله‌ای" className="mx-auto w-40 h-40 border rounded-lg bg-white p-1" />
+                                    )}
+                                    <p className="text-sm text-slate-600">یا کلید زیر را به صورت دستی وارد کنید:</p>
+                                    <code dir="ltr" className="block bg-white border rounded-lg p-2 text-center text-sm break-all">{twoFactorSetup.secret}</code>
+                                    <p className="text-sm text-slate-600">۲) کد ۶ رقمی نمایش‌داده‌شده را وارد کنید:</p>
+                                    <input
+                                        type="text"
+                                        inputMode="numeric"
+                                        maxLength={6}
+                                        value={twoFactorCode}
+                                        onChange={e => setTwoFactorCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                                        className="w-full p-2 border rounded-lg min-h-[40px] text-center tracking-[0.5em]"
+                                        dir="ltr"
+                                        placeholder="------"
+                                    />
+                                    <div className="flex gap-2">
+                                        <button onClick={handleTwoFactorVerify} disabled={twoFactorBusy} className="flex-1 bg-green-500 text-white px-4 py-2 min-h-[40px] rounded-lg hover:bg-green-600 disabled:bg-green-300">فعال‌سازی</button>
+                                        <button onClick={() => { setTwoFactorSetup(null); setTwoFactorCode(''); }} disabled={twoFactorBusy} className="px-4 py-2 min-h-[40px] rounded-lg border text-slate-600 hover:bg-slate-100">لغو</button>
+                                    </div>
+                                </div>
+                            )
+                        )}
+
+                        {twoFactorEnabled && (
+                            <div className="space-y-3 p-4 border rounded-lg">
+                                <p className="text-sm text-slate-600">برای غیرفعال کردن ورود دو مرحله‌ای، رمز عبور حساب خود را وارد کنید.</p>
+                                <input
+                                    type="password"
+                                    value={twoFactorDisablePassword}
+                                    onChange={e => setTwoFactorDisablePassword(e.target.value)}
+                                    className="w-full p-2 border rounded-lg"
+                                    placeholder="رمز عبور"
+                                />
+                                <button onClick={handleTwoFactorDisable} disabled={twoFactorBusy} className="w-full bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 disabled:bg-red-300">غیرفعال‌سازی دو مرحله‌ای</button>
+                            </div>
+                        )}
                     </div>
                 </div>
 
@@ -964,6 +1177,55 @@ const SettingsPage: React.FC = () => {
                          </div>
                      </div>
                 </div>
+
+                {isAdmin && (
+                <div className="border-t pt-6 mt-6">
+                    <div className="flex items-center justify-between border-b pb-2 mb-3">
+                        <h3 className="text-lg font-semibold text-slate-600">بکاپ‌های خودکار سرور</h3>
+                        <button onClick={refreshServerBackups} disabled={serverBackupsLoading} className="text-sky-600 text-sm hover:text-sky-800 disabled:text-slate-400">به‌روزرسانی</button>
+                    </div>
+                    <p className="text-sm text-slate-500 mb-4">
+                        در این بخش می‌توانید پشتیبان‌های خودکاری که سرور تهیه کرده است را مشاهده و در صورت نیاز بازیابی کنید.
+                        <strong className="text-red-500"> بازیابی، داده‌های زنده سامانه را بازنویسی می‌کند.</strong>
+                    </p>
+                    {serverBackupsLoading ? (
+                        <p className="text-sm text-slate-400">در حال بارگذاری...</p>
+                    ) : serverBackups.length === 0 ? (
+                        <p className="text-sm text-slate-400">هیچ پشتیبان خودکاری روی سرور یافت نشد.</p>
+                    ) : (
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-sm text-right border rounded-lg">
+                                <thead className="bg-slate-50 text-slate-600">
+                                    <tr>
+                                        <th className="p-2 border-b">نام فایل</th>
+                                        <th className="p-2 border-b">حجم</th>
+                                        <th className="p-2 border-b">تاریخ</th>
+                                        <th className="p-2 border-b">عملیات</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {serverBackups.map(file => (
+                                        <tr key={file.name} className="border-b last:border-b-0">
+                                            <td className="p-2 break-all" dir="ltr">{file.name}</td>
+                                            <td className="p-2 whitespace-nowrap">{formatBytes(file.sizeBytes)}</td>
+                                            <td className="p-2 whitespace-nowrap">{file.mtime ? toPersianNumerals(formatDate(file.mtime)) : '-'}</td>
+                                            <td className="p-2">
+                                                <button
+                                                    onClick={() => handleRestoreServerBackup(file)}
+                                                    disabled={restoringFile === file.name}
+                                                    className="bg-amber-500 text-white px-3 py-2 min-h-[40px] rounded-lg hover:bg-amber-600 disabled:bg-amber-300 whitespace-nowrap"
+                                                >
+                                                    {restoringFile === file.name ? 'در حال بازیابی...' : 'بازیابی'}
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                </div>
+                )}
             </div>
         </div>
     );

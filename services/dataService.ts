@@ -108,6 +108,34 @@ export const onUnauthorized = (handler: () => void): (() => void) => {
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, handler);
 };
 
+// --- Global sync status (additive, UI-only) ------------------------------------------
+// A tiny observable so the UI can render a single global online/offline/syncing
+// indicator without reaching into the IndexedDB outbox. Module-level state, never
+// persisted, and it never throws (a status broadcast must not break the sync path).
+export interface SyncState {
+    syncing: boolean;
+    lastSyncAt: number | null;
+}
+
+const syncState: SyncState = { syncing: false, lastSyncAt: null };
+
+/** Window event dispatched whenever the sync lifecycle/state changes. */
+export const SYNC_STATE_EVENT = 'sync_state_changed';
+
+/** Read a snapshot of the current sync state. Always returns a fresh copy. */
+export const getSyncState = (): SyncState => ({ ...syncState });
+
+/**
+ * Merge a patch into the sync state and notify subscribers. Guarded with try/catch so a
+ * status broadcast can never throw back into callers (including `triggerSync`).
+ */
+const setSyncState = (patch: Partial<SyncState>): void => {
+    Object.assign(syncState, patch);
+    try {
+        if (typeof window !== 'undefined') window.dispatchEvent(new Event(SYNC_STATE_EVENT));
+    } catch { /* never let a UI status update break the sync path */ }
+};
+
 export const sendRestRequest = async <T = any>(
     url: string,
     options: RequestInit = {}
@@ -329,6 +357,54 @@ const saveAllInvoices = async (invoices: Remittance[]): Promise<void> => {
     await dataStore.setItem(INVOICES_KEY, invoices);
 };
 
+// --- Invoice ordering helpers (newest-first, deterministic, non-mutating) ---
+// Resolve a numeric millisecond timestamp for any invoice:
+//  1) numeric `createdAt` (server rows via coerceMs),
+//  2) parseable `createdAt` string/date,
+//  3) the millisecond stamp embedded in locally-generated ids (`inv_<ms>_<rand>`),
+//  4) 0 as a last resort so the comparator never yields NaN.
+export const createdMs = (inv: any): number => {
+    const c = inv?.createdAt;
+    if (typeof c === 'number' && Number.isFinite(c)) return c;
+    if (c) {
+        const parsed = typeof c === 'string' ? Date.parse(c) : new Date(c).getTime();
+        if (Number.isFinite(parsed)) return parsed;
+    }
+    const m = /^inv_(\d{10,})_/.exec(String(inv?.id ?? ''));
+    if (m) return Number(m[1]);
+    return 0;
+};
+
+// Newest-first with a deterministic descending-id tiebreaker. Always returns a NEW array,
+// so it is safe to apply to shared/cached arrays without mutating them in place.
+export const sortNewestFirst = <T extends Remittance>(list: T[]): T[] =>
+    [...list].sort((a, b) => (createdMs(b) - createdMs(a)) || String(b.id).localeCompare(String(a.id)));
+
+// Read the authoritative per-day manual position of an invoice as delivered by the server.
+// The DB column is `sort_order` (integer, 0-based, per type+date); the API serializes it as
+// `sortOrder`. Accept both spellings and numeric strings so the fallback never silently no-ops.
+const serverOrdinal = (inv: any): number | null => {
+    const v = inv?.sortOrder ?? inv?.sort_order;
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v);
+    return null;
+};
+
+// Reconstruct the manual order for one (type,date) from the server `sort_order` ordinal.
+// Rows that carry no ordinal (brand-new invoices) are appended newest-first. Returns `null`
+// when nothing carries an ordinal, so the caller keeps the default newest-first order.
+const orderIdsFromServer = <T extends Remittance>(filtered: T[]): string[] | null => {
+    const withOrdinal = filtered.filter(inv => serverOrdinal(inv) !== null);
+    if (withOrdinal.length === 0) return null;
+    const ordered = [...withOrdinal].sort((a, b) => {
+        const d = (serverOrdinal(a) as number) - (serverOrdinal(b) as number);
+        return d !== 0 ? d : String(a.id).localeCompare(String(b.id));
+    });
+    const listed = new Set(ordered.map(inv => inv.id));
+    const remainder = sortNewestFirst(filtered.filter(inv => !listed.has(inv.id)));
+    return [...ordered.map(inv => inv.id), ...remainder.map(inv => inv.id)];
+};
+
 export const getInvoicesByDate = <T extends Remittance>(type: 'entry' | 'exit', date: Date): T[] => {
     const allInvoices = getAllInvoices();
     const dateStr = formatToISODate(date);
@@ -343,7 +419,7 @@ export const getInvoicesByDate = <T extends Remittance>(type: 'entry' | 'exit', 
     if (orderedIdsStr) {
         try {
             const orderedIds = JSON.parse(orderedIdsStr);
-            if (Array.isArray(orderedIds)) {
+            if (Array.isArray(orderedIds) && orderedIds.length > 0) {
                 const invoiceMap = new Map(filtered.map(inv => [inv.id, inv]));
                 const sortedInvoices: T[] = [];
                 orderedIds.forEach((id: string) => {
@@ -353,13 +429,36 @@ export const getInvoicesByDate = <T extends Remittance>(type: 'entry' | 'exit', 
                         invoiceMap.delete(id);
                     }
                 });
-                return [...sortedInvoices, ...(Array.from(invoiceMap.values()) as T[])];
+                // Keep the saved manual order for listed ids, but order the remaining (unlisted)
+                // invoices newest-first instead of leaving them in raw cache order.
+                return [...sortedInvoices, ...sortNewestFirst(Array.from(invoiceMap.values()) as T[])];
             }
+            // Treat an empty saved array the same as a missing key, so the durable fallback
+            // below can repopulate it.
         } catch (_e) {
             // Sort order parsing error, fallback to default order
         }
     }
-    return filtered.sort((a, b) => a.createdAt - b.createdAt);
+
+    // Durable fallback (the HTTPS-origin / fresh-device failsafe): when this browser has no
+    // saved manual order for the day, rebuild it from the server's per-day `sort_order`
+    // ordinal and SEED the local preference, so the manual layout reproduces itself on any
+    // new origin, cache clear, or device without a console step.
+    const serverOrderIds = orderIdsFromServer(filtered);
+    if (serverOrderIds) {
+        try {
+            localStorage.setItem(sortOrderKey, JSON.stringify(serverOrderIds));
+        } catch (_e) {
+            // Private mode / quota: still apply the order for this render.
+        }
+        const byId = new Map<string, T>(filtered.map(inv => [inv.id, inv]));
+        return serverOrderIds.map(id => byId.get(id)).filter((inv): inv is T => inv !== undefined);
+    }
+
+    // Newest-first (most recent first), with a deterministic id tiebreaker. This is the
+    // failsafe order: it no longer depends on `createdAt` being present, so locally created
+    // / offline / not-yet-hydrated rows sort correctly instead of degrading to id-only order.
+    return sortNewestFirst(filtered);
 };
 
 
@@ -367,7 +466,9 @@ export const addInvoice = async (invoiceData: any, type: 'entry' | 'exit'): Prom
     const operationId = uuidv4();
     const id = invoiceData.id || `inv_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
     
-    const newInvoice = { ...invoiceData, id, type };
+    // Stamp a client-side createdAt so ordering works immediately, even before the next
+    // server round-trip/hydration (previously locally-created rows had no createdAt at all).
+    const newInvoice = { ...invoiceData, id, type, createdAt: (typeof invoiceData?.createdAt === 'number' && Number.isFinite(invoiceData.createdAt)) ? invoiceData.createdAt : Date.now() };
     if (type === 'exit' && newInvoice.farmerId) {
         const _farmer = getFarmers().find((f: any) => f.id === newInvoice.farmerId);
         if (_farmer && _farmer.name) newInvoice.farmerName = _farmer.name;
@@ -408,7 +509,9 @@ export const addInvoice = async (invoiceData: any, type: 'entry' | 'exit'): Prom
     try {
         const key = `sortOrder_${type}_${newInvoice.date}`;
         const currentOrder = JSON.parse(localStorage.getItem(key) || '[]');
-        localStorage.setItem(key, JSON.stringify([...currentOrder, id]));
+        // Prepend so a newly added invoice appears at the TOP of the day's list (newest-first),
+        // instead of being appended to the bottom.
+        localStorage.setItem(key, JSON.stringify([id, ...currentOrder.filter((x: string) => x !== id)]));
     } catch (e) {}
     
     if (newInvoice.driverName?.trim()) await addDriver(newInvoice.driverName).catch(() => {});
@@ -563,7 +666,7 @@ export const bulkMoveInvoicesByIds = async (type: 'entry' | 'exit', ids: string[
         }
     }
 
-    await logAction('bulkMoved', 'bulkMove', { count: ids.length, subType: type });
+    await logAction('bulkMoved', 'bulkMove', { count: ids.length, subType: type }).catch(() => {});
     return ids.length;
 };
 
@@ -592,7 +695,18 @@ export const searchAllInvoices = (query: string, options: any) => {
         searchableContent.push(productMap.get(inv.productId) || '');
         searchableContent.push((inv.driverName || '').toLowerCase());
         searchableContent.push(inv.date);
-        
+
+        // Invoice free-text (Persian «توضیحات»). The authoritative server column is
+        // `invoices.notes` and it exists on BOTH entry and exit rows. Read defensively
+        // (null/undefined safe) and tolerate legacy `description`/`details` aliases so
+        // offline/local search keeps working regardless of which key carries the text.
+        for (const freeTextField of ['notes', 'note', 'description', 'details'] as const) {
+            const rawFreeText = (inv as any)[freeTextField];
+            if (typeof rawFreeText === 'string' && rawFreeText) {
+                searchableContent.push(rawFreeText.toLowerCase());
+            }
+        }
+
         if (isEntry) {
             const entry = inv as Entry;
             searchableContent.push((entry.sellerName || '').toLowerCase());
@@ -1242,6 +1356,7 @@ export const mergeProducts = async (sourceId: string, targetId: string): Promise
             else uniqueItems.push(item);
         });
 
+        return { ...f, finishedGoodId: newFinishedId, items: uniqueItems };
     });
     await dataStore.setItem(FORMULAS_KEY, updatedFormulas);
 
@@ -1258,7 +1373,7 @@ export const mergeProducts = async (sourceId: string, targetId: string): Promise
     const newSettings = { ...settings, products: newProducts, feedQuotas: newQuotas, productPhaseDurations: newDurations };
     await saveSettings(newSettings);
     
-    await logAction('merged', 'product', { sourceId, targetId });
+    await logAction('merged', 'product', { sourceId, targetId }).catch(() => {});
 };
 
 export const mergeDrivers = async (sourceName: string, targetName: string): Promise<number> => {
@@ -1565,55 +1680,73 @@ export const triggerSync = async (): Promise<boolean> => {
     const pending = await db.getAllFromIndex('syncQueue', 'by-status', 'pending');
     if (pending.length === 0) return true;
 
-    const TERMINAL_CODES = ['CONFLICT', 'VALIDATION_FAILED', 'INSUFFICIENT_STOCK', 'UNKNOWN_FARMER', 'UNKNOWN_PRODUCT', 'NOT_FOUND', 'AUTH_FAILED', 'FORBIDDEN'];
+    // Publish the "syncing" lifecycle so the global status indicator can reflect it.
+    // The finally block guarantees the flag always settles; setSyncState never throws.
+    setSyncState({ syncing: true });
+    try {
+        const TERMINAL_CODES = ['CONFLICT', 'VALIDATION_FAILED', 'INSUFFICIENT_STOCK', 'UNKNOWN_FARMER', 'UNKNOWN_PRODUCT', 'NOT_FOUND', 'AUTH_FAILED', 'FORBIDDEN'];
 
-    let allSuccess = true;
-    const deadLetter = async (mutation: any, code?: string, message?: string) => {
-        await moveToFailedMutations(mutation.id, { code, message });
-    };
-    const scheduleRetry = async (mutation: any, code?: string, message?: string) => {
-        const retryCount = (mutation.retryCount || 0) + 1;
-        if (retryCount >= MAX_SYNC_RETRIES) {
-            await deadLetter(mutation, code, message);
-        } else {
-            await updateMutation({ ...mutation, retryCount, status: 'pending', lastError: message });
-            allSuccess = false;
-        }
-    };
-
-    for (const mutation of pending) {
-        try {
-            let apiRes;
-            if (mutation.action === 'create') {
-                apiRes = await sendRestRequest('/api/invoices', { method: 'POST', headers: { 'X-Operation-Id': mutation.id }, body: JSON.stringify(mutation.payload) });
-            } else if (mutation.action === 'update') {
-                apiRes = await sendRestRequest(`/api/invoices/${encodeURIComponent(mutation.payload.id)}`, { method: 'PUT', headers: { 'X-Operation-Id': mutation.id }, body: JSON.stringify(mutation.payload) });
-            } else if (mutation.action === 'delete') {
-                apiRes = await sendRestRequest(`/api/invoices/${encodeURIComponent(mutation.payload.id)}`, { method: 'DELETE', headers: { 'X-Operation-Id': mutation.id } });
-            }
-
-            if (apiRes?.success) {
-                await db.delete('syncQueue', mutation.id);
-                continue;
-            }
-
-            const code = apiRes?.error?.code;
-            const message = apiRes?.error?.message;
-            if (code === 'IDEMPOTENCY_KEY_REUSE') {
-                // The server already applied this exact operationId - nothing left to do.
-                await db.delete('syncQueue', mutation.id);
-            } else if (code === 'OFFLINE') {
-                allSuccess = false; // connectivity, not a data problem: retry later without burning attempts
-            } else if (TERMINAL_CODES.includes(code as string)) {
+        let allSuccess = true;
+        const deadLetter = async (mutation: any, code?: string, message?: string) => {
+            await moveToFailedMutations(mutation.id, { code, message });
+        };
+        const scheduleRetry = async (mutation: any, code?: string, message?: string) => {
+            const retryCount = (mutation.retryCount || 0) + 1;
+            if (retryCount >= MAX_SYNC_RETRIES) {
                 await deadLetter(mutation, code, message);
             } else {
-                await scheduleRetry(mutation, code || 'SERVER_ERROR', message);
+                await updateMutation({ ...mutation, retryCount, status: 'pending', lastError: message });
+                allSuccess = false;
             }
-        } catch (e: any) {
-            await scheduleRetry(mutation, 'NETWORK', e?.message);
-        }
-    }
+        };
 
-    if (allSuccess) await hydrateFromServer();
-    return allSuccess;
+        for (const mutation of pending) {
+            try {
+                let apiRes;
+                if (mutation.entityType === 'invoices') {
+                    // REST invoice routes (require X-Operation-Id) — unchanged behaviour.
+                    if (mutation.action === 'create') {
+                        apiRes = await sendRestRequest('/api/invoices', { method: 'POST', headers: { 'X-Operation-Id': mutation.id }, body: JSON.stringify(mutation.payload) });
+                    } else if (mutation.action === 'update') {
+                        apiRes = await sendRestRequest(`/api/invoices/${encodeURIComponent(mutation.payload.id)}`, { method: 'PUT', headers: { 'X-Operation-Id': mutation.id }, body: JSON.stringify(mutation.payload) });
+                    } else {
+                        apiRes = await sendRestRequest(`/api/invoices/${encodeURIComponent(mutation.payload.id)}`, { method: 'DELETE', headers: { 'X-Operation-Id': mutation.id } });
+                    }
+                } else {
+                    // Unified sync endpoint handles settings/farmers/drivers/origins/formulas/
+                    // production/adjustments/logs/invoices via { id, action, entityType, data }.
+                    apiRes = await sendRestRequest('/api/sync', {
+                        method: 'POST',
+                        headers: { 'X-Operation-Id': mutation.id },
+                        body: JSON.stringify({ id: mutation.id, action: mutation.action, entityType: mutation.entityType, data: mutation.payload }),
+                    });
+                }
+
+                if (apiRes?.success) {
+                    await db.delete('syncQueue', mutation.id);
+                    continue;
+                }
+
+                const code = apiRes?.error?.code;
+                const message = apiRes?.error?.message;
+                if (code === 'IDEMPOTENCY_KEY_REUSE') {
+                    // The server already applied this exact operationId - nothing left to do.
+                    await db.delete('syncQueue', mutation.id);
+                } else if (code === 'OFFLINE') {
+                    allSuccess = false; // connectivity, not a data problem: retry later without burning attempts
+                } else if (TERMINAL_CODES.includes(code as string)) {
+                    await deadLetter(mutation, code, message);
+                } else {
+                    await scheduleRetry(mutation, code || 'SERVER_ERROR', message);
+                }
+            } catch (e: any) {
+                await scheduleRetry(mutation, 'NETWORK', e?.message);
+            }
+        }
+
+        if (allSuccess) await hydrateFromServer();
+        return allSuccess;
+    } finally {
+        setSyncState({ syncing: false, lastSyncAt: Date.now() });
+    }
 };

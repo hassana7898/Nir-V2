@@ -29,6 +29,7 @@ export interface InvoiceInput {
   productVariant?: string;
   isCrumble?: boolean;
   isPageBreak?: boolean;
+  notes?: string;
 }
 
 /** Error carrying an API-contract code so the route layer can answer precisely. */
@@ -155,6 +156,7 @@ export const createInvoiceInTransaction = async (tx: any, data: InvoiceInput): P
     productVariant: data.productVariant || null,
     isCrumble: Boolean(data.isCrumble),
     isPageBreak: Boolean(data.isPageBreak),
+    notes: data?.notes === undefined || data?.notes === null ? null : String(data.notes),
     version: 1,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -198,6 +200,7 @@ export const updateInvoiceInTransaction = async (tx: any, id: string, data: Part
   }
   if (data.isCrumble !== undefined) updatePayload.isCrumble = Boolean(data.isCrumble);
   if (data.isPageBreak !== undefined) updatePayload.isPageBreak = Boolean(data.isPageBreak);
+  if (data.notes !== undefined) updatePayload.notes = data.notes === null ? null : String(data.notes);
 
   const invoiceType = data.type || prev.type;
   const invDate = data.date || prev.date;
@@ -246,6 +249,11 @@ export const bulkMoveInvoicesWithTransaction = async (ids: string[], targetDate:
       affected.forEach((r: any) => r.productId && touchedProducts.add(String(r.productId)));
       await tx.update(inventory_transactions).set({ date: targetDate, updatedAt: new Date() }).where(eq(inventory_transactions.referenceId, id));
       count++;
+    }
+    // Serialize recomputation per product: an advisory xact lock keeps concurrent
+    // bulk moves from interleaving their running-balance recalculation.
+    for (const productId of touchedProducts) {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${productId}))`);
     }
     // Re-dating ledger rows changes their ordering, so the running snapshots move too.
     await recalculateLedgerBalances(tx, [...touchedProducts]);

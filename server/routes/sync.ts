@@ -1,5 +1,5 @@
 import express from 'express';
-import { sql, eq } from 'drizzle-orm';
+import { sql, eq, and, lte, desc } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { recordInventoryTransaction, createReversingTransaction, getInventoryStockByDate } from '../services/inventoryService';
@@ -66,7 +66,7 @@ router.get('/state', async (_req, res) => {
       db.select().from(schema.farmers),
       db.select().from(schema.drivers),
       db.select().from(schema.origins),
-      db.select().from(schema.invoices),
+      db.select().from(schema.invoices).orderBy(desc(schema.invoices.date), desc(schema.invoices.createdAt), desc(schema.invoices.id)),
       db.select().from(schema.formulas),
       db.select().from(schema.production_records),
       db.select().from(schema.inventory_adjustments),
@@ -141,13 +141,13 @@ router.post('/', requireRole('ADMIN', 'MANAGER', 'ACCOUNTING', 'OPERATOR'), asyn
           }
           const productId = String(item.productId);
           const date = String(item.date);
-          const stockRows = await tx.select({ total: sql<string>`coalesce(sum(cast(${schema.inventory_transactions.quantity} as numeric)), 0)` }).from(schema.inventory_transactions).where(eq(schema.inventory_transactions.productId, productId));
+          await createReversingTransaction(tx, String(item.id));
+          const stockRows = await tx.select({ total: sql<string>`coalesce(sum(cast(${schema.inventory_transactions.quantity} as numeric)), 0)` }).from(schema.inventory_transactions).where(and(eq(schema.inventory_transactions.productId, productId), lte(schema.inventory_transactions.date, date)));
           const currentQty = Number(stockRows[0]?.total || 0);
           const newQty = Number(item.newQuantity);
           if (!Number.isFinite(newQty)) throw new Error('موجودی جدید نامعتبر است.');
           const diff = newQty - currentQty;
           await tx.insert(schema.inventory_adjustments).values({ id: String(item.id), date, productId, newQuantity: String(newQty), reason: nullable(item.reason), createdAt: asDate(item.createdAt), updatedAt: asDate(item.updatedAt), deletedAt: null }).onConflictDoUpdate({ target: schema.inventory_adjustments.id, set: { date, productId, newQuantity: String(newQty), reason: nullable(item.reason), deletedAt: null, updatedAt: new Date() } });
-          await createReversingTransaction(tx, String(item.id));
           if (diff !== 0) await recordInventoryTransaction(tx, { date, productId, type: 'adjustment', quantity: diff, referenceType: 'inventory_adjustment', referenceId: String(item.id), notes: nullable(item.reason) || 'تعدیل موجودی انبار' });
           break;
         }

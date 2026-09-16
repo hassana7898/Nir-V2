@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Factory Remittance Manager">
+  <rect x="0" y="0" width="64" height="64" rx="12" fill="#0f172a"/>
+  <!-- factory body -->
+  <path d="M12 46V28l10 6v-6l10 6v-6l10 6v12z" fill="#38bdf8"/>
+  <!-- roof / box lid -->
+  <rect x="12" y="20" width="30" height="6" rx="1.5" fill="#7dd3fc"/>
+  <!-- chimney -->
+  <rect x="46" y="18" width="6" height="14" rx="1.5" fill="#94a3b8"/>
+  <!-- base -->
+  <rect x="12" y="46" width="40" height="4" rx="1.5" fill="#e2e8f0"/>
+</svg>

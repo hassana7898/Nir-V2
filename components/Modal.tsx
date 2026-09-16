@@ -17,13 +17,13 @@ const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, footer 
             <div className="bg-white rounded-xl shadow-2xl w-full max-w-md flex flex-col max-h-[90vh] animate-fade-in-up" onClick={e => e.stopPropagation()}>
                 <div className="flex justify-between items-center p-4 border-b border-slate-100">
                     <h3 className="text-lg font-bold text-slate-700">{title}</h3>
-                    <button onClick={onClose} className="text-slate-400 hover:text-red-500 transition-colors text-2xl leading-none">&times;</button>
+                    <button onClick={onClose} className="text-slate-400 hover:text-red-500 transition-colors text-2xl leading-none p-2">&times;</button>
                 </div>
                 <div className="p-5 overflow-y-auto">
                     {children}
                 </div>
                 {footer && (
-                    <div className="p-4 border-t border-slate-100 bg-slate-50 rounded-b-xl flex justify-end gap-2">
+                    <div className="p-4 border-t border-slate-100 bg-slate-50 rounded-b-xl flex flex-wrap justify-end gap-2 sticky bottom-0">
                         {footer}
                     </div>
                 )}

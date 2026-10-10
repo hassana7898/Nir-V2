@@ -320,7 +320,6 @@ const WeighbridgePage: React.FC = () => {
                 invoiceNumber: String(form.invoiceNumber || '') || undefined,
                 transportCost: String(form.transportCost || '') || null,
                 notes: String(form.notes || '') || undefined,
-                productVariant: String(form.productVariant || '') || undefined,
             });
             if (res.success) {
                 showToast('حواله ایجاد و قبض باسکول به آن متصل شد', 'success');
@@ -336,19 +335,19 @@ const WeighbridgePage: React.FC = () => {
 
     const unmap = async (record: WeighbridgeRecord) => {
         const confirm = await Swal.fire({
-            title: 'لغو تخصیص قبض',
-            html: `قبض <b>${record.externalId}</b> از حواله متصل جدا شود؟`,
+            title: 'لغو تخصیص و حذف حواله',
+            html: `قبض <b>${record.externalId}</b> از حواله جدا شود؟<br/><span style="font-size:12px;color:#b91c1c">حواله‌ای که از این قبض ساخته شده به‌طور کامل حذف می‌شود.</span>`,
             icon: 'warning',
             showCancelButton: true,
-            confirmButtonText: 'لغو تخصیص',
+            confirmButtonText: 'لغو تخصیص و حذف حواله',
             cancelButtonText: 'انصراف',
             confirmButtonColor: '#dc2626',
             cancelButtonColor: '#64748b',
         });
         if (!confirm.isConfirmed) return;
-        const res = await dataService.unmapWeighbridgeRecord(record.id);
+        const res = await dataService.unmapWeighbridgeRecord(record.id, true);
         if (res.success) {
-            showToast(res.data?.weightReverted ? 'تخصیص لغو و وزن ثبت‌شده برداشته شد' : 'تخصیص لغو شد (وزن حواله دست‌نخورده ماند)', 'success');
+            showToast(res.data?.invoiceDeleted ? 'تخصیص لغو و حوالهٔ آن حذف شد' : 'تخصیص لغو شد (وزن حواله دست‌نخورده ماند)', 'success');
             await load();
         } else {
             showToast(res.error?.message || 'خطا در لغو تخصیص', 'error');

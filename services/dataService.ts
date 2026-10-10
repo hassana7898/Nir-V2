@@ -2528,11 +2528,12 @@ export const mapWeighbridgeRecord = (id: number, invoiceId: string) =>
         { method: 'POST', body: JSON.stringify({ invoiceId }) }
     );
 
-/** POST /api/weighbridge/records/:id/unmap — remove the link (restoring the invoice's previous weight). */
-export const unmapWeighbridgeRecord = (id: number) =>
-    sendRestRequest<{ recordId: number; invoiceId: string; weightReverted: boolean; restoredValue: number | null }>(
+/** POST /api/weighbridge/records/:id/unmap — remove the link. The invoice created from this ticket
+ *  is deleted by default (`deleteInvoice:false` only clears the ticket's weight contribution). */
+export const unmapWeighbridgeRecord = (id: number, deleteInvoice = true) =>
+    sendRestRequest<{ recordId: number; invoiceId: string; invoiceDeleted: boolean; weightReverted: boolean; restoredValue: number | null }>(
         `/api/weighbridge/records/${id}/unmap`,
-        { method: 'POST', body: JSON.stringify({}) }
+        { method: 'POST', body: JSON.stringify({ deleteInvoice }) }
     );
 
 /** PATCH /api/weighbridge/records/:id/direction — manual entry/exit override (survives re-syncs). */

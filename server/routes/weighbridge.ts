@@ -7,7 +7,7 @@ import { db } from "../db";
 import { farmers, invoices, weighbridge_records } from "../db/schema";
 import { requireRole } from "../middleware/auth";
 import { actorFromRequest, recordAudit } from "../services/auditService";
-import { createInvoiceInTransaction } from "../services/invoiceService";
+import { createInvoiceInTransaction, deleteInvoiceInTransaction } from "../services/invoiceService";
 import { addDays, dayDistance, jalaliWindow, plateKey, toGregorian, toJalali } from "../../shared/jalali";
 
 /**
@@ -775,8 +775,21 @@ router.post("/records/:id/unmap", requireRole("ADMIN", "MANAGER"), async (req, r
       const previous = asText(rec.previousWeightValue);
       const prevNumber = asNumber(rec.previousWeightValue);
       let restored = false;
+      // The operator asked for unmapping to remove the whole remittance (the invoice was created
+      // from this very ticket), not merely to blank its weight. `deleteInvoice:false` keeps the old
+      // behaviour (revert the weight only) for any caller that still needs it.
+      const deleteInvoice = (req.body || {}).deleteInvoice !== false;
 
-      if (invoice) {
+      // Free the ticket first so nothing references the invoice while it is removed.
+      await tx
+        .update(weighbridge_records)
+        .set({ status: "unmapped", mappedRemittanceId: null, previousWeightValue: null, updatedAt: new Date() })
+        .where(eq(weighbridge_records.id, id));
+
+      if (deleteInvoice && invoice) {
+        await deleteInvoiceInTransaction(tx, invoiceId, actor);
+        restored = true; // (the whole invoice is gone, so the weight question is moot)
+      } else if (invoice) {
         const column = weightColumnFor(String(invoice.type));
         const current = asNumber((invoice as any)[column]);
         // Only touch the invoice when the stored value is still exactly what this ticket wrote:
@@ -790,29 +803,26 @@ router.post("/records/:id/unmap", requireRole("ADMIN", "MANAGER"), async (req, r
         }
       }
 
-      await tx
-        .update(weighbridge_records)
-        .set({ status: "unmapped", mappedRemittanceId: null, previousWeightValue: null, updatedAt: new Date() })
-        .where(eq(weighbridge_records.id, id));
-
       await recordAudit(tx, actor, {
         action: "UPDATE",
         entity: "weighbridge",
         targetIds: [String(id), invoiceId],
         changes: [
           { field: "status", label: "وضعیت قبض", from: rec.status, to: "unmapped" },
-          ...(restored ? [{ field: "weight", label: "وزن حواله", from: net, to: prevNumber }] : []),
+          ...(deleteInvoice ? [{ field: "invoice", label: "حواله", from: invoiceId, to: null }] : []),
         ],
-        context: { weighbridgeRecordId: id, invoiceId, weightRestored: restored, netWeight: net, previousWeight: prevNumber },
-        details: `لغو تخصیص قبض باسکول ${rec.externalId} از حواله ${invoiceId}${
-          restored ? ` (وزن حواله به مقدار قبلی ${prevNumber ?? "خالی"} بازگردانده شد)` : " (وزن حواله دستی تغییر کرده بود و دست‌نخورده ماند)"
-        }`,
+        context: { weighbridgeRecordId: id, invoiceId, invoiceDeleted: deleteInvoice, netWeight: net, previousWeight: prevNumber },
+        details: deleteInvoice
+          ? `لغو تخصیص قبض باسکول ${rec.externalId} و حذف حواله ${asText(invoice?.invoiceNumber) || asText(invoice?.billNumber) || invoiceId}`
+          : `لغو تخصیص قبض باسکول ${rec.externalId} از حواله ${invoiceId}${
+              restored ? ` (وزن حواله به مقدار قبلی ${prevNumber ?? "خالی"} بازگردانده شد)` : " (وزن حواله دستی تغییر کرده بود و دست‌نخورده ماند)"
+            }`,
       });
 
-      return { recordId: id, invoiceId, weightReverted: restored, restoredValue: prevNumber };
+      return { recordId: id, invoiceId, invoiceDeleted: deleteInvoice, weightReverted: restored && !deleteInvoice, restoredValue: prevNumber };
     });
 
-    return res.json({ success: true, data: result, message: "تخصیص قبض لغو شد" });
+    return res.json({ success: true, data: result, message: result.invoiceDeleted ? "تخصیص لغو و حواله حذف شد" : "تخصیص قبض لغو شد" });
   } catch (error: any) {
     const status = error?.status || error?.statusCode || 500;
     console.error("[NIR WEIGHBRIDGE] unmap failed:", error?.message || error);
@@ -992,7 +1002,6 @@ router.post("/records/:id/create-remittance", requireRole("ADMIN", "MANAGER"), a
         driverPhone: asText(b.driverPhone) || undefined,
         driverIBAN: asText(b.driverIBAN) || undefined,
         notes: asText(b.notes) || undefined,
-        productVariant: asText(b.productVariant) || undefined,
       };
 
       if (type === "entry") {

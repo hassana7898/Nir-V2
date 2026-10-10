@@ -105,7 +105,7 @@ const syncStatusLabel = (status: SidebarSyncStatus, pendingCount: number): strin
 
 const Sidebar: React.FC<{ open: boolean; onClose: () => void }> = ({ open, onClose }) => {
     const { settings } = useSettings();
-    const { logout } = useAuth();
+    const { logout, role, isAdmin } = useAuth();
     const { status: syncStatus, pendingCount } = useSidebarSyncStatus();
     
     const navLinkClass = ({ isActive }: { isActive: boolean }): string => {
@@ -158,18 +158,30 @@ const Sidebar: React.FC<{ open: boolean; onClose: () => void }> = ({ open, onClo
                     <BroodIcon className="h-6 w-6 ml-3" />
                     <span>مدیریت دوره‌ها</span>
                 </NavLink>
+                {settings.enabledMenus?.warehouses !== false && (
                 <NavLink to="/inventory" className={navLinkClass} onClick={onClose}>
                     <InventoryIcon className="h-6 w-6 ml-3" />
                     <span>انبارداری</span>
                 </NavLink>
+                )}
+                {settings.enabledMenus?.inventoryAnalysis !== false && (
                  <NavLink to="/inventory-analysis" className={navLinkClass} onClick={onClose}>
                     <AnalysisIcon className="h-6 w-6 ml-3" />
                     <span>آنالیز انبار</span>
                 </NavLink>
+                )}
+                {settings.enabledMenus?.production !== false && (
                 <NavLink to="/production" className={navLinkClass} onClick={onClose}>
                     <ProductionIcon className="h-6 w-6 ml-3" />
                     <span>تولید</span>
                 </NavLink>
+                )}
+                {settings.enabledMenus?.weighbridge !== false && (
+                <NavLink to="/weighbridge" className={navLinkClass} onClick={onClose}>
+                    <WeighbridgeIcon className="h-6 w-6 ml-3" />
+                    <span>مدیریت باسکول</span>
+                </NavLink>
+                )}
                 <NavLink to="/global-search" className={navLinkClass} onClick={onClose}>
                     <SearchIcon className="h-6 w-6 ml-3" />
                     <span>جستجوی سراسری</span>
@@ -178,9 +190,15 @@ const Sidebar: React.FC<{ open: boolean; onClose: () => void }> = ({ open, onClo
                     <ReportsIcon className="h-6 w-6 ml-3" />
                     <span>گزارش‌گیری</span>
                 </NavLink>
+                {(isAdmin || ['ADMIN', 'MANAGER', 'ACCOUNTING'].includes(String(role || '').toUpperCase())) && (
+                    <NavLink to="/reports-dashboard" className={navLinkClass} onClick={onClose}>
+                        <ChartIcon className="h-6 w-6 ml-3" />
+                        <span>داشبورد گزارش‌گیری</span>
+                    </NavLink>
+                )}
                 <NavLink to="/log" className={navLinkClass} onClick={onClose}>
                     <LogIcon className="h-6 w-6 ml-3" />
-                    <span>سابقه فعالیت</span>
+                    <span>ردپای کاربران</span>
                 </NavLink>
                 <NavLink to="/settings" className={navLinkClass} onClick={onClose}>
                     <SettingsIcon className="h-6 w-6 ml-3" />
@@ -263,6 +281,12 @@ const SearchIcon = (props: React.SVGProps<SVGSVGElement>) => (
     </svg>
 );
 
+const ChartIcon = (props: React.SVGProps<SVGSVGElement>) => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3 20.25h18M6.75 20.25V12m4.5 8.25V6.75m4.5 13.5v-5.25m4.5 5.25V9.75" />
+    </svg>
+);
+
 const ReportsIcon = (props: React.SVGProps<SVGSVGElement>) => (
     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" {...props}>
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2m15-10h2a4 4 0 014 4v2M9 17a4 4 0 014 4h2a4 4 0 014-4v-2M5 7a4 4 0 014-4h2a4 4 0 014 4v2" />
@@ -272,6 +296,13 @@ const ReportsIcon = (props: React.SVGProps<SVGSVGElement>) => (
 const LogIcon = (props: React.SVGProps<SVGSVGElement>) => (
     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} {...props}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+    </svg>
+);
+
+const WeighbridgeIcon = (props: React.SVGProps<SVGSVGElement>) => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} {...props}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3 20h18M6 20V9m12 11V9M4 9h16l-2.2-4.4A1 1 0 0 0 16.9 4H7.1a1 1 0 0 0-.9.6L4 9Z" />
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v6m-2.5-3h5" />
     </svg>
 );
 

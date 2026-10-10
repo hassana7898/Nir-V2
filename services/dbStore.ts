@@ -108,6 +108,30 @@ export const getPendingMutations = async () => {
   return db.getAllFromIndex('syncQueue', 'by-status', 'pending');
 };
 
+/** How many mutations are still waiting in the retryable outbox (index-backed count). */
+export const getPendingMutationCount = async (): Promise<number> => {
+  const db = await initDB();
+  return db.countFromIndex('syncQueue', 'by-status', 'pending');
+};
+
+/**
+ * PURGE the retryable outbox ("پاکسازی صف").
+ *
+ * Escape hatch for a queue clogged with mutations the server keeps rejecting (old/corrupt
+ * payloads that predate a schema change). The dead-letter store is deliberately NOT touched:
+ * mutations that already exhausted their retries stay reviewable/requeueable, so a purge
+ * only drops the items that are still cycling through the retry budget.
+ *
+ * @returns the number of dropped mutations, so the caller can report it to the user.
+ */
+export const clearSyncQueue = async (): Promise<number> => {
+  const db = await initDB();
+  const dropped = (await db.getAllKeys('syncQueue')).length;
+  await db.clear('syncQueue');
+  dispatch('sync_queue_updated');
+  return dropped;
+};
+
 export const updateMutation = async (mutation: SyncMutation) => {
   const db = await initDB();
   await db.put('syncQueue', mutation);

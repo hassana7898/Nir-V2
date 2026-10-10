@@ -2,18 +2,31 @@ import React, { useCallback, useEffect, useState } from 'react';
 import Swal from 'sweetalert2';
 import {
   FailedMutation,
+  SyncMutation,
   getFailedMutationList,
   getPendingMutations,
   requeueFailedMutation,
   discardFailedMutation,
   clearFailedMutations,
+  clearSyncQueue,
+  removeMutation,
 } from '../services/dbStore';
 import { triggerSync, getSyncState } from '../services/dataService';
 import { toPersianNumerals } from '../utils/formatters';
+import { showToast } from '../utils/helpers';
 
 const ACTION_LABEL: Record<string, string> = { create: 'ایجاد', update: 'ویرایش', delete: 'حذف' };
 
 type ConnectionStatus = 'offline' | 'failed' | 'syncing' | 'pending' | 'online';
+
+/** Auto-drain cadence while the outbox is non-empty (ms). */
+const AUTO_DRAIN_INTERVAL = 60000;
+
+const itemError = (m: { lastError?: string; failureCode?: string }): string =>
+  (m.lastError || m.failureCode || 'خطای نامشخص').slice(0, 140);
+
+const smallButtonStyle =
+  'background:#fee2e2;color:#b91c1c;border:0;border-radius:6px;padding:2px 8px;font-size:11px;cursor:pointer;white-space:nowrap';
 
 /**
  * Global sync / connectivity indicator.
@@ -25,11 +38,14 @@ type ConnectionStatus = 'offline' | 'failed' | 'syncing' | 'pending' | 'online';
  *   - pending  : retryable mutations waiting in the outbox (sky, pulsing)
  *   - online   : everything healthy (green, small dot)
  *
- * The failed-mutation panel is actionable: retry or discard - dead letters never block
- * the rest of the sync.
+ * The panel is state-accurate: a failure state NEVER renders a success checkmark, and both
+ * queues are actionable - "همگام‌سازی فوری" drains the outbox, "پاک‌سازی صف" purges it, and
+ * single items can be dropped inline. The outbox is also drained automatically (on mount, when
+ * the browser comes back online and every minute while it is non-empty) so a queue can never
+ * sit stuck forever just because nobody opened this panel.
  */
 const SyncStatusIndicator: React.FC = () => {
-  const [pendingCount, setPendingCount] = useState(0);
+  const [pending, setPending] = useState<SyncMutation[]>([]);
   const [failed, setFailed] = useState<FailedMutation[]>([]);
   const [busy, setBusy] = useState(false);
   const [online, setOnline] = useState<boolean>(() =>
@@ -37,10 +53,12 @@ const SyncStatusIndicator: React.FC = () => {
   );
   const [syncing, setSyncing] = useState<boolean>(() => getSyncState().syncing);
 
+  const pendingCount = pending.length;
+
   const refresh = useCallback(async () => {
     try {
       const [p, f] = await Promise.all([getPendingMutations(), getFailedMutationList()]);
-      setPendingCount(p.length);
+      setPending(p as SyncMutation[]);
       setFailed(f);
     } catch {
       /* IndexedDB unavailable - nothing to show */
@@ -80,48 +98,196 @@ const SyncStatusIndicator: React.FC = () => {
     return () => window.removeEventListener('sync_state_changed', onSyncState);
   }, []);
 
+  /**
+   * Auto-drain the outbox. This is the fix for the "33 items pending forever" outage: the queue
+   * used to be drained only by a button that was hidden whenever no dead letters existed.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    const drain = async () => {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+      let queued: SyncMutation[] = [];
+      try {
+        queued = (await getPendingMutations()) as SyncMutation[];
+      } catch {
+        return;
+      }
+      if (cancelled || queued.length === 0) return;
+      try {
+        await triggerSync();
+      } catch (e) {
+        // A failed drain must never produce an unhandled rejection; the queue just stays put.
+        console.warn('[NIR] auto-sync failed:', e);
+      }
+      if (!cancelled) await refresh();
+    };
+    void drain();
+    const timer = window.setInterval(() => { void drain(); }, AUTO_DRAIN_INTERVAL);
+    window.addEventListener('online', drain);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener('online', drain);
+    };
+  }, [refresh]);
+
   const openPanel = async () => {
-    const rows = (await getFailedMutationList())
-      .map((m) => `<li style="margin:4px 0">
-            <code style="font-size:11px;background:#f1f5f9;padding:2px 4px;border-radius:4px">${m.entityType} · ${ACTION_LABEL[m.action] || m.action}</code>
-            <span style="color:#b91c1c;font-size:12px"> ${(m.lastError || m.failureCode || 'خطای نامشخص').slice(0, 120)}</span>
+    const [pendingRows, failedRows] = await Promise.all([getPendingMutations(), getFailedMutationList()]);
+    setPending(pendingRows as SyncMutation[]);
+    setFailed(failedRows);
+
+    const hasPending = pendingRows.length > 0;
+    const hasFailed = failedRows.length > 0;
+
+    // Each queue is listed with its own real error text: the old panel showed a success
+    // checkmark plus "صف خطا خالی است" even when 33 mutations were still waiting.
+    const failedHtml = failedRows
+      .map((m) => `<li style="margin:6px 0;display:flex;gap:6px;align-items:flex-start;justify-content:space-between">
+            <span>
+              <code style="font-size:11px;background:#f1f5f9;padding:2px 4px;border-radius:4px">${m.entityType} · ${ACTION_LABEL[m.action] || m.action}</code>
+              <span style="color:#b91c1c;font-size:12px"> ${itemError(m)}</span>
+              <span style="display:block;color:#64748b;font-size:11px">تلاش‌ها: ${toPersianNumerals(m.retryCount || 0)}${m.failureCode ? ' · کد: ' + m.failureCode : ''}</span>
+            </span>
+            <button type="button" data-discard-id="${m.id}" style="${smallButtonStyle}">حذف</button>
           </li>`)
       .join('');
 
+    const pendingHtml = pendingRows
+      .map((m) => `<li style="margin:6px 0;display:flex;gap:6px;align-items:flex-start;justify-content:space-between">
+            <span>
+              <code style="font-size:11px;background:#f1f5f9;padding:2px 4px;border-radius:4px">${m.entityType} · ${ACTION_LABEL[m.action] || m.action}</code>
+              <span style="color:#b45309;font-size:12px"> ${itemError(m)}</span>
+              <span style="display:block;color:#64748b;font-size:11px">تلاش‌ها: ${toPersianNumerals(m.retryCount || 0)}</span>
+            </span>
+            <button type="button" data-pending-id="${m.id}" style="${smallButtonStyle}">حذف</button>
+          </li>`)
+      .join('');
+
+    const body = hasFailed
+      ? `<div style="text-align:right;font-size:13px">این عملیات‌ها پس از تلاش‌های مکرر رد شدند و به «صف خطا» منتقل شده‌اند؛ بقیه‌ی همگام‌سازی را متوقف نمی‌کنند:
+           <ul style="padding-inline-start:18px;margin:8px 0">${failedHtml}</ul></div>`
+      : hasPending
+        ? `<div style="text-align:right;font-size:13px">
+             ${toPersianNumerals(pendingRows.length)} تغییر هنوز روی سرور اعمال نشده است. با «همگام‌سازی فوری» دوباره ارسال می‌شود:
+             <ul style="padding-inline-start:18px;margin:8px 0">${pendingHtml}</ul></div>`
+        : '<div style="text-align:right;font-size:13px">همه‌ی تغییرات با سرور همگام است.</div>';
+
     const result = await Swal.fire({
-      title: 'عملیات ناموفق (صف خطا)',
-      html: rows
-        ? `<div style="text-align:right;font-size:13px">این عملیات‌ها پس از تلاش‌های مکرر در صف خطا قرار گرفتند و بقیه‌ی همگام‌سازی را متوقف نمی‌کنند:<ul style="padding-inline-start:18px;margin:8px 0">${rows}</ul></div>`
-        : '<div style="font-size:13px">صف خطا خالی است.</div>',
-      icon: rows ? 'warning' : 'success',
-      showDenyButton: !!rows,
-      denyButtonText: 'تلاش مجدد همه',
-      showCancelButton: !!rows,
-      cancelButtonText: 'پاک کردن صف خطا',
+      title: hasFailed ? 'عملیات ناموفق (صف خطا)' : hasPending ? 'در انتظار همگام‌سازی' : 'همگام‌سازی سالم',
+      html: body,
+      // A failure/pending state must NEVER render a green success checkmark.
+      icon: hasFailed ? 'error' : hasPending ? 'warning' : 'success',
+      showDenyButton: hasFailed || hasPending,
+      denyButtonText: hasFailed ? 'تلاش مجدد همه' : 'همگام‌سازی فوری',
+      denyButtonColor: '#059669',
+      showCancelButton: hasFailed || hasPending,
+      cancelButtonText: hasFailed ? 'پاک کردن صف خطا' : 'پاک‌سازی صف',
+      cancelButtonColor: '#dc2626',
       confirmButtonText: 'بستن',
       confirmButtonColor: '#0284c7',
-      denyButtonColor: '#059669',
-      cancelButtonColor: '#64748b',
+      didOpen: (popup) => {
+        // Per-item removal: give up on ONE stubborn mutation without touching the rest.
+        popup.querySelectorAll<HTMLButtonElement>('button[data-discard-id]').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const id = btn.getAttribute('data-discard-id');
+            if (!id) return;
+            await discard(id);
+            Swal.close();
+            showToast('مورد ناموفق حذف شد.', 'info');
+          });
+        });
+        popup.querySelectorAll<HTMLButtonElement>('button[data-pending-id]').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const id = btn.getAttribute('data-pending-id');
+            if (!id) return;
+            await removeMutation(id);
+            Swal.close();
+            showToast('مورد از صف همگام‌سازی حذف شد.', 'info');
+          });
+        });
+      },
     });
 
     if (result.isDenied) {
-      setBusy(true);
-      const list = await getFailedMutationList();
-      for (const m of list) await requeueFailedMutation(m.id);
-      await triggerSync();
-      await refresh();
-      setBusy(false);
-      Swal.fire({ title: 'تلاش مجدد انجام شد', icon: 'success', timer: 1500, showConfirmButton: false });
+      // "تلاش مجدد همه" / "همگام‌سازی فوری" - the drain is now ALWAYS reachable, even with an
+      // empty dead-letter store (that is what used to leave 33 items stuck forever).
+      if (hasFailed) await retryAllFailed();
+      else await syncNow();
     } else if (result.isDismissed && result.dismiss === Swal.DismissReason.cancel) {
-      await clearFailedMutations();
-      await refresh();
-      Swal.fire({ title: 'صف خطا پاک شد', icon: 'success', timer: 1500, showConfirmButton: false });
+      await purge(hasFailed ? 'failed' : 'pending');
     }
   };
 
+  /** Drop a single dead letter. */
   const discard = async (id: string) => {
     await discardFailedMutation(id);
     await refresh();
+  };
+
+  /** Drain whatever is queued right now and report the REAL outcome (icon included). */
+  const syncNow = async (): Promise<{ pending: number; failed: number }> => {
+    setBusy(true);
+    const ok = await triggerSync();
+    const [p, f] = await Promise.all([getPendingMutations(), getFailedMutationList()]);
+    setPending(p as SyncMutation[]);
+    setFailed(f);
+    setBusy(false);
+
+    if (ok && p.length === 0 && f.length === 0) {
+      showToast('همگام‌سازی با موفقیت انجام شد.', 'success');
+    } else if (f.length > 0) {
+      // A real failure must NEVER be reported with a green checkmark.
+      showToast(
+        `همگام‌سازی ناموفق: ${toPersianNumerals(f.length)} مورد به صف خطا منتقل و ${toPersianNumerals(p.length)} مورد در صف ماند.`,
+        'error'
+      );
+    } else {
+      showToast(`همگام‌سازی کامل نشد؛ ${toPersianNumerals(p.length)} مورد در انتظار باقی ماند.`, 'warning');
+    }
+    return { pending: p.length, failed: f.length };
+  };
+
+  /** Retry every dead letter: requeue, drain, then report what really happened. */
+  const retryAllFailed = async () => {
+    setBusy(true);
+    const list = await getFailedMutationList();
+    for (const m of list) await requeueFailedMutation(m.id);
+    setBusy(false);
+    await syncNow();
+  };
+
+  /**
+   * PURGE a queue (پاک‌سازی صف). Destructive, so it always asks first and reports with a
+   * neutral icon - never a success checkmark for dropping data.
+   */
+  const purge = async (kind: 'pending' | 'failed') => {
+    const count = kind === 'pending' ? pendingCount : failed.length;
+    const confirmResult = await Swal.fire({
+      title: kind === 'pending' ? 'پاک‌سازی صف همگام‌سازی' : 'پاک کردن صف خطا',
+      html: `<div style="text-align:right;font-size:13px">
+              ${toPersianNumerals(count)} مورد از صف ${kind === 'pending' ? 'همگام‌سازی' : 'خطا'} حذف می‌شود و دیگر روی سرور اعمال نخواهد شد.
+              ${kind === 'pending' ? '<br/><b>اگر چند دستگاه دارید، ابتدا «همگام‌سازی فوری» را امتحان کنید.</b>' : ''}
+            </div>`,
+      icon: 'warning',
+      showCancelButton: true,
+      confirmButtonText: 'بله، پاک کن',
+      cancelButtonText: 'انصراف',
+      confirmButtonColor: '#dc2626',
+      cancelButtonColor: '#64748b',
+    });
+    if (!confirmResult.isConfirmed) return;
+
+    setBusy(true);
+    if (kind === 'pending') await clearSyncQueue();
+    else await clearFailedMutations();
+    await refresh();
+    setBusy(false);
+    showToast(
+      kind === 'pending'
+        ? `${toPersianNumerals(count)} مورد از صف همگام‌سازی پاک شد.`
+        : 'صف خطا پاک شد.',
+      'info'
+    );
   };
 
   const hasFailed = failed.length > 0;
@@ -169,12 +335,12 @@ const SyncStatusIndicator: React.FC = () => {
     status === 'offline'
       ? 'آفلاین - اتصال اینترنت برقرار نیست'
       : status === 'failed'
-        ? 'عملیات ناموفق - برای مشاهده کلیک کنید'
+        ? 'عملیات ناموفق - برای مشاهده، تلاش مجدد یا پاک‌سازی صف کلیک کنید'
         : status === 'syncing'
           ? 'در حال همگام‌سازی'
           : status === 'pending'
-            ? 'در انتظار همگام‌سازی'
-            : 'آنلاین';
+            ? 'در انتظار همگام‌سازی - برای همگام‌سازی فوری یا پاک‌سازی صف کلیک کنید'
+            : 'آنلاین - همه‌ی تغییرات همگام شده است';
 
   return (
     <button

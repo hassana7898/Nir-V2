@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, json, decimal, index, boolean, integer } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, json, decimal, index, boolean, integer, serial } from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
   id: text("id").primaryKey(),
@@ -241,6 +241,30 @@ export const logs = pgTable("logs", {
   by: text("by"),
 }, (t) => ({ timestampIdx: index("logs_timestamp_idx").on(t.timestamp), typeIdx: index("logs_type_idx").on(t.type) }));
 
+// Server-authoritative audit trail (ردپای کاربران).
+// Unlike `logs` (client-authored history that the browser decides to send), every row here is
+// written INSIDE the same transaction as the change it describes: it cannot diverge from the data,
+// cannot be skipped by the client, and always carries the authenticated actor.
+export const audit_logs = pgTable("audit_logs", {
+  id: text("id").primaryKey(),
+  userId: text("user_id"),
+  username: text("username"),
+  role: text("role"),
+  action: text("action").notNull(),      // CREATE | UPDATE | DELETE | REORDER | BULK_MOVE | ...
+  entity: text("entity").notNull(),      // invoice | ...
+  targetIds: json("target_ids"),         // string[] of affected invoice ids
+  summary: json("summary"),              // { changes: [{ field, label, from, to }], context?: {...} }
+  details: text("details"),              // Persian one-line summary for the UI
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (t) => ({
+  createdAtIdx: index("audit_logs_created_at_idx").on(t.createdAt),
+  actionIdx: index("audit_logs_action_idx").on(t.action),
+  userIdx: index("audit_logs_user_id_idx").on(t.userId),
+  entityIdx: index("audit_logs_entity_idx").on(t.entity),
+}));
+
 export const sync_mutations = pgTable("sync_mutations", {
   id: text("id").primaryKey(), // Using operationId as PK
   entityType: text("entity_type").notNull(),
@@ -258,4 +282,67 @@ export const sync_mutations = pgTable("sync_mutations", {
 }, (t) => ({ 
   createdAtIdx: index("sync_mutations_created_at_idx").on(t.createdAt),
   operationFingerprintIdx: index("sync_mutations_fingerprint_idx").on(t.id, t.requestFingerprint)
+}));
+
+/**
+ * Weighbridge tickets (باسکول توزین نگار).
+ *
+ * Rows are imported from the factory's SQL Server `WEIGHNGDB.WeightTable` by the background
+ * worker (workers/weighbridge-worker.ts) and keyed by `externalId` = that table's primary key,
+ * so re-importing is an idempotent upsert.
+ *
+ * `mappedRemittanceId` points at the entry (purchase) or exit (sale) invoice this ticket was
+ * assigned to; `status` flips to 'mapped' in the same transaction that writes the net weight
+ * onto that invoice, and back to 'unmapped' if the link is removed.
+ */
+export const weighbridge_records = pgTable("weighbridge_records", {
+  id: serial("id").primaryKey(),
+  externalId: integer("external_id").notNull().unique(),
+  ticketNumber: text("ticket_number"),
+  plateNumber: text("plate_number"),
+  driverName: text("driver_name"),
+  carrierCompany: text("carrier_company"),
+  /** Goods / material name (`Goods`) exactly as the weighing software wrote it (نوع کالا). */
+  goods: text("goods"),
+  /** Customer name (`CustomerName`) as the weighing software recorded it for this ticket. */
+  customerName: text("customer_name"),
+  /**
+   * Remittance number (`ShomareHavale`) — the human حواله number. It is NOT the ticket serial
+   * (`external_id` = the SQL Server `ID`); both are kept side by side.
+   */
+  remittanceNumber: text("remittance_number"),
+  grossWeight: decimal("gross_weight"),
+  tareWeight: decimal("tare_weight"),
+  netWeight: decimal("net_weight"),
+  /**
+   * Wall-clock factory time, kept as a raw string (`mode: 'string'`) on purpose: these are
+   * `timestamp without time zone` columns holding the weighing software's own local time, so
+   * letting Drizzle build a JS `Date` would re-interpret them in the server's zone and shift the
+   * displayed hour by ±3.5h. The raw string is what the UI prints (Jalali + clock).
+   */
+  weighTime: timestamp("weigh_time", { mode: "string" }),
+  /**
+   * The weighing software's own in/out flag, normalised to 'entry' (ورود) | 'exit' (خروج) |
+   * 'unknown'. It decides which kind of remittance the UI offers for this ticket.
+   */
+  direction: text("direction").default("unknown").notNull(),
+  /**
+   * TRUE once the operator has overridden `direction` by hand (the «ویرایش نوع» button). The
+   * sync worker then keeps the stored value instead of re-deriving it on every run.
+   */
+  directionLocked: boolean("direction_locked").notNull().default(false),
+  status: text("status").default("unmapped").notNull(),
+  mappedRemittanceId: text("mapped_remittance_id").references(() => invoices.id),
+  /** Value the invoice's weight column had before this ticket wrote to it (restored on unmap). */
+  previousWeightValue: text("previous_weight_value"),
+  source: text("source").default("WEIGHNGDB.WeightTable"),
+  rawPayload: json("raw_payload"),
+  lastSyncedAt: timestamp("last_synced_at", { mode: "string" }),
+  createdAt: timestamp("created_at", { mode: "string" }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { mode: "string" }).defaultNow().notNull(),
+}, (t) => ({
+  weighTimeIdx: index("weighbridge_records_weigh_time_idx").on(t.weighTime),
+  plateIdx: index("weighbridge_records_plate_idx").on(t.plateNumber),
+  statusIdx: index("weighbridge_records_status_idx").on(t.status),
+  mappedIdx: index("weighbridge_records_mapped_idx").on(t.mappedRemittanceId),
 }));

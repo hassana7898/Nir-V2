@@ -6,6 +6,7 @@ import * as dataService from '../services/dataService';
 import { useSettings } from '../contexts/SettingsContext';
 import { toPersianNumerals, formatToISODate, formatDateWithWeekday, formatCurrency } from '../utils/formatters';
 import { showToast } from '../utils/helpers';
+import { sortRows, nextSortSpecs, debugSort } from '../utils/tableSort';
 import { handlePrint, calculatePrintPages } from '../utils/print';
 import Modal from '../components/Modal';
 import Swal from 'sweetalert2';
@@ -50,7 +51,7 @@ const ExitPage: React.FC = () => {
     const [pageSettings, setPageSettings] = useState<{title: string, description: string}[]>([]);
     const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
 
-    const { settings, productMap } = useSettings();
+    const { settings, productMap, saveSettings } = useSettings();
     const tableBodyRef = useRef<HTMLTableSectionElement>(null);
     const sortableInstance = useRef<any | null>(null);
     const firstInputRef = useRef<HTMLSelectElement>(null);
@@ -80,6 +81,14 @@ const ExitPage: React.FC = () => {
     }, [currentDate]);
 
     useEffect(() => { fetchExits(); }, [fetchExits]);
+
+    // Device-sync fix: re-read the day as soon as hydration has rebuilt the layout from the
+    // server's authoritative `sort_order`.
+    useEffect(() => {
+        const onOrderSynced = () => fetchExits();
+        window.addEventListener(dataService.ORDER_SYNCED_EVENT, onOrderSynced);
+        return () => window.removeEventListener(dataService.ORDER_SYNCED_EVENT, onOrderSynced);
+    }, [fetchExits]);
     
     useEffect(() => {
         const timerId = setTimeout(() => { setDebouncedSearchTerm(searchTerm); }, 300);
@@ -87,33 +96,9 @@ const ExitPage: React.FC = () => {
     }, [searchTerm]);
 
     const handleSort = (key: SortableKeys, event: React.MouseEvent) => {
-        setSortConfig(prev => {
-            const existingIndex = prev.findIndex(s => s.key === key);
-            let newConfig = [...prev];
-
-            if (event.shiftKey) {
-                if (existingIndex > -1) {
-                    if (prev[existingIndex].direction === 'asc') {
-                        newConfig[existingIndex].direction = 'desc';
-                    } else {
-                        newConfig.splice(existingIndex, 1);
-                    }
-                } else {
-                    newConfig.push({ key, direction: 'asc' });
-                }
-            } else {
-                if (existingIndex > -1 && prev.length === 1) {
-                    if (prev[0].direction === 'asc') {
-                        newConfig = [{ key, direction: 'desc' }];
-                    } else {
-                        newConfig = [];
-                    }
-                } else {
-                    newConfig = [{ key, direction: 'asc' }];
-                }
-            }
-            return newConfig;
-        });
+        // Shift = add a secondary level. Sorting the ROWS is the only thing that changes; the
+        // sort config itself is pure state (see utils/tableSort for the row-integrity rule).
+        setSortConfig(prev => nextSortSpecs<SortableKeys>(prev, key, event.shiftKey));
     };
 
     const filteredExits = useMemo(() => {
@@ -132,39 +117,98 @@ const ExitPage: React.FC = () => {
         }
 
         if (sortConfig.length > 0) {
-            result.sort((a, b) => {
-                for (const sort of sortConfig) {
-                    let aVal: any, bVal: any;
-                    
-                    if (sort.key === 'farmerId') {
-                        aVal = fMap.get(a.farmerId) || '';
-                        bVal = fMap.get(b.farmerId) || '';
-                    } else if (sort.key === 'productId') {
-                        aVal = productOrderMap.get(a.productId) ?? 999;
-                        bVal = productOrderMap.get(b.productId) ?? 999;
-                    } else {
-                        aVal = (a as any)[sort.key];
-                        bVal = (b as any)[sort.key];
-                    }
-
-                    if (aVal === undefined || aVal === null) aVal = '';
-                    if (bVal === undefined || bVal === null) bVal = '';
-
-                    if (aVal < bVal) return sort.direction === 'asc' ? -1 : 1;
-                    if (aVal > bVal) return sort.direction === 'asc' ? 1 : -1;
-                }
-                
+            // ROW INTEGRITY: `sortRows` sorts the WHOLE exit objects; the farmer name is read
+            // through an accessor (farmerId -> name) so a row's name can never detach from its
+            // own weights during a multi-level sort.
+            const tiebreak = (a: Exit, b: Exit) => {
                 if (sortConfig[0]?.key !== 'farmerId') {
                     const aName = fMap.get(a.farmerId) || '';
                     const bName = fMap.get(b.farmerId) || '';
-                    if (aName < bName) return -1;
-                    if (aName > bName) return 1;
+                    if (aName !== bName) return aName.localeCompare(bName, 'fa', { numeric: true, sensitivity: 'base' }) < 0 ? -1 : 1;
                 }
                 return dataService.createdMs(a) - dataService.createdMs(b);
-            });
+            };
+
+            result = debugSort<Exit>(
+                'exit',
+                sortRows<Exit, SortableKeys>(
+                    result,
+                    sortConfig,
+                    {
+                        farmerId: (e) => fMap.get(e.farmerId) || '',
+                        productId: (e) => productOrderMap.get(e.productId) ?? 999,
+                    },
+                    tiebreak,
+                ),
+                exits,
+                sortConfig as any,
+                ['id', 'date', 'farmerId', 'productId', 'weight', 'driverName', 'invoiceNumber'],
+            );
         }
         return result;
     }, [exits, debouncedSearchTerm, farmers, productMap, sortConfig, productOrderMap]);
+
+    // --- Dedicated page title, visible in the UI (not only in the print preview) -------------
+    const [titleDraft, setTitleDraft] = useState(settings.exitPrintTitle || '');
+    const titleSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    useEffect(() => { setTitleDraft(settings.exitPrintTitle || ''); }, [settings.exitPrintTitle]);
+    useEffect(() => () => { if (titleSaveTimer.current) clearTimeout(titleSaveTimer.current); }, []);
+
+    const commitTitle = (value: string, immediate = false) => {
+        setTitleDraft(value);
+        if (titleSaveTimer.current) clearTimeout(titleSaveTimer.current);
+        const persist = () => saveSettings({ ...settings, exitPrintTitle: value });
+        if (immediate) persist();
+        else titleSaveTimer.current = setTimeout(persist, 800);
+    };
+
+    const effectiveTitle = (pageSettings[0]?.title || '').trim() || titleDraft.trim() || 'فرم خروج روزانه';
+
+    // --- Per-product totals of the rendered (filtered) view ----------------------------------
+    const productTotals = useMemo(() => {
+        const map = new Map<string, { name: string; total: number; rows: number }>();
+        filteredExits.forEach(e => {
+            const key = e.productId || '-';
+            const bucket = map.get(key) || { name: productMap.get(key) || key, total: 0, rows: 0 };
+            bucket.total += Number(e.weight || 0);
+            bucket.rows += 1;
+            map.set(key, bucket);
+        });
+        return Array.from(map.values()).sort((a, b) => b.total - a.total);
+    }, [filteredExits, productMap]);
+
+    // --- Per-page print titles, editable INLINE in the main UI -------------------------------
+    // Same rule as the print engine (calculatePrintPages): a row flagged `isPageBreak` starts a new
+    // page. Page 1 keeps the master bar above the table; later pages get their own input in place.
+    const pageTitleSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    useEffect(() => () => { if (pageTitleSaveTimer.current) clearTimeout(pageTitleSaveTimer.current); }, []);
+
+    const pageStarts = useMemo(() => {
+        const map = new Map<number, number>(); // rowIndex -> pageIndex (pages 2..n only)
+        calculatePrintPages(filteredExits).forEach((page, pageIndex) => {
+            if (pageIndex > 0 && page.offset < filteredExits.length) map.set(page.offset, pageIndex);
+        });
+        return map;
+    }, [filteredExits]);
+
+    const pageTitleValue = (pageIndex: number): string => {
+        const live = pageSettings[pageIndex]?.title;
+        if (live !== undefined) return live;
+        return settings.exitPageTitles?.[pageIndex] || '';
+    };
+
+    const setPageTitle = (pageIndex: number, value: string, immediate = false) => {
+        const next = [...pageSettings];
+        if (!next[pageIndex]) next[pageIndex] = { title: '', description: '' };
+        next[pageIndex] = { ...next[pageIndex], title: value };
+        setPageSettings(next);
+
+        const titles = next.map(p => p?.title || '');
+        if (pageTitleSaveTimer.current) clearTimeout(pageTitleSaveTimer.current);
+        if (immediate) saveSettings({ ...settings, exitPageTitles: titles });
+        else pageTitleSaveTimer.current = setTimeout(() => saveSettings({ ...settings, exitPageTitles: titles }), 800);
+    };
 
     const totalWeight = useMemo(() => {
         return filteredExits.reduce((sum, item) => sum + (item.weight || 0), 0);
@@ -173,17 +217,26 @@ const ExitPage: React.FC = () => {
     useEffect(() => {
         if (tableBodyRef.current) {
             if (sortableInstance.current) sortableInstance.current.destroy();
-            const isDnDDisabled = pageBreakMode || !!debouncedSearchTerm.trim();
+            // A sorted table is a VIEW: manual reordering stays disabled while a sort is active so
+            // the on-screen (sorted) order can never be written back into the stored list.
+            const isDnDDisabled = pageBreakMode || !!debouncedSearchTerm.trim() || isViewer || sortConfig.length > 0;
 
             sortableInstance.current = Sortable.create(tableBodyRef.current, {
                 animation: 150,
                 handle: '.cursor-move',
+                // Per-page title rows live inside this body too: they are filtered out of dragging
+                // and the reorder math uses the DRAggable indices, so they cannot shift row order.
+                filter: '.page-title-row',
                 disabled: isDnDDisabled,
                 onEnd: (evt: any) => {
-                    const { oldIndex, newIndex } = evt;
+                    // Defensive guard: never reorder while a sort config exists.
+                    if (sortConfig.length > 0) return;
+                    const oldIndex = evt.oldDraggableIndex !== undefined ? evt.oldDraggableIndex : evt.oldIndex;
+                    const newIndex = evt.newDraggableIndex !== undefined ? evt.newDraggableIndex : evt.newIndex;
                     if (oldIndex === undefined || newIndex === undefined || oldIndex === newIndex) return;
                     
-                    const newOrdered = [...filteredExits];
+                    // Reorder the WHOLE stored list (row objects) - never the filtered view.
+                    const newOrdered = [...exits];
                     const [movedItem] = newOrdered.splice(oldIndex, 1);
                     newOrdered.splice(newIndex, 0, movedItem);
                     
@@ -202,7 +255,7 @@ const ExitPage: React.FC = () => {
                 sortableInstance.current = null;
             }
         };
-    }, [filteredExits, debouncedSearchTerm, pageBreakMode, sortConfig]);
+    }, [exits, filteredExits, debouncedSearchTerm, pageBreakMode, sortConfig]);
 
     const handleSaveOrder = async () => {
         if (!!searchTerm) {
@@ -441,12 +494,8 @@ const ExitPage: React.FC = () => {
                                         <input
                                             type="text"
                                             value={pageSettings[index]?.title || ''}
-                                            onChange={e => {
-                                                const newSettings = [...pageSettings];
-                                                if (!newSettings[index]) newSettings[index] = { title: '', description: '' };
-                                                newSettings[index].title = e.target.value;
-                                                setPageSettings(newSettings);
-                                            }}
+                                            onChange={e => setPageTitle(index, e.target.value)}
+                                            onBlur={e => setPageTitle(index, e.target.value, true)}
                                             className="w-full p-2 border rounded-lg text-sm"
                                             placeholder="تیتر پیش‌فرض جایگزین می‌شود..."
                                         />
@@ -526,12 +575,14 @@ const ExitPage: React.FC = () => {
                         </div>
                         <div>
                             <label className="block text-xs font-bold text-slate-500 mb-1">نوع محصول</label>
+                            {/* UX: an exit is a sale of FINISHED goods, so the final products come first
+                                (grouped and labelled) and the raw materials are pushed below the divider. */}
                             <select onKeyDown={handleKeyDown} value={formData.productId} onChange={e => setFormData({...formData, productId: e.target.value})} className="w-full p-2 border rounded-lg h-[42px]">
-                                <optgroup label="ماده اولیه">
-                                    {settings.products.filter(p => !p.isDeleted && p.type === 'rawMaterial').map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                                </optgroup>
-                                <optgroup label="محصول نهایی">
+                                <optgroup label="محصولات نهایی (محصول فروش)">
                                     {settings.products.filter(p => !p.isDeleted && p.type === 'finishedGood').map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                                </optgroup>
+                                <optgroup label="مواد اولیه">
+                                    {settings.products.filter(p => !p.isDeleted && p.type === 'rawMaterial').map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                                 </optgroup>
                             </select>
                         </div>
@@ -561,16 +612,31 @@ const ExitPage: React.FC = () => {
                             </div>
                         </div>
                     </div>
-                    <div className="border-t pt-4">
-                        <label className="block text-xs font-bold text-slate-500 mb-1">توضیحات</label>
-                        <input onKeyDown={handleKeyDown} placeholder="توضیحات (اختیاری)" value={formData.notes || ''} onChange={e => setFormData({...formData, notes: e.target.value})} className="w-full p-2 border rounded-lg" />
-                    </div>
                     <div className="flex justify-end gap-2 border-t pt-4">
                         <button type="submit" className="bg-green-500 text-white px-8 py-2 rounded-lg font-bold">ذخیره (Enter)</button>
                         <button type="button" onClick={() => setIsFormVisible(false)} className="bg-gray-400 text-white px-8 py-2 rounded-lg">انصراف</button>
                     </div>
                 </form>
             )}
+
+            {/* Dedicated page title in the main UI, directly above the table (Task 4). */}
+            <div className="flex flex-wrap items-center gap-3 bg-white px-4 py-3 rounded-xl shadow-md border-r-4 border-emerald-500 no-print">
+                <div className="flex items-center gap-2">
+                    <span className="text-[11px] text-slate-400">عنوان صفحه ۱ (اعمال بر همه صفحات):</span>
+                    <h2 className="text-lg font-bold text-slate-800">{effectiveTitle}</h2>
+                </div>
+                <div className="flex items-center gap-2 mr-auto">
+                    <input
+                        value={titleDraft}
+                        onChange={e => commitTitle(e.target.value)}
+                        onBlur={e => commitTitle(e.target.value, true)}
+                        placeholder="عنوان اختصاصی این صفحه..."
+                        className="p-2 border rounded-lg text-sm min-w-[260px]"
+                    />
+                    <span className="text-[11px] text-slate-400 whitespace-nowrap">ذخیره خودکار</span>
+                </div>
+                <span className="text-sm font-bold text-slate-500 whitespace-nowrap">{formatDateWithWeekday(currentDate)}</span>
+            </div>
 
             <div className="bg-white p-5 rounded-xl shadow-md overflow-x-auto">
                 <div className="text-xs text-slate-400 mb-2 flex items-center gap-1">
@@ -605,11 +671,31 @@ const ExitPage: React.FC = () => {
                         {filteredExits.map((e, idx) => {
                             const farmerName = farmers.find(f => f.id === e.farmerId)?.name || 'ناشناس';
                             return (
-                                <tr key={e.id} data-id={e.id} onClick={() => pageBreakMode && handleTogglePageBreak(e.id)} className={`hover:bg-slate-50 transition-all ${e.isPageBreak ? 'page-break-indicator' : ''}`}>
+                                <React.Fragment key={e.id}>
+                                {pageStarts.has(idx) && (
+                                    <tr className="page-title-row no-print">
+                                        <td colSpan={8} className="p-2 bg-emerald-50 border-y-2 border-emerald-300">
+                                            <div className="flex items-center gap-2 flex-wrap">
+                                                <span className="font-bold text-emerald-900 text-sm whitespace-nowrap">
+                                                    شروع صفحه {toPersianNumerals((pageStarts.get(idx) as number) + 1)}:
+                                                </span>
+                                                <input
+                                                    value={pageTitleValue(pageStarts.get(idx) as number)}
+                                                    onChange={ev => setPageTitle(pageStarts.get(idx) as number, ev.target.value)}
+                                                    onBlur={ev => setPageTitle(pageStarts.get(idx) as number, ev.target.value, true)}
+                                                    placeholder="عنوان اختصاصی این صفحه..."
+                                                    className="p-1.5 border rounded-lg text-sm min-w-[240px] flex-grow"
+                                                />
+                                                <span className="text-[11px] text-slate-500 whitespace-nowrap">ذخیره خودکار</span>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                )}
+                                <tr data-id={e.id} onClick={() => pageBreakMode && handleTogglePageBreak(e.id)} className={`hover:bg-slate-50 transition-all ${e.isPageBreak ? 'page-break-indicator' : ''}`}>
                                     <td className="p-2 border border-slate-400 no-print">
                                         {!pageBreakMode && <input type="checkbox" checked={selectedIds.has(e.id)} onChange={() => toggleSelection(e.id)} onClick={ev => ev.stopPropagation()} />}
                                     </td>
-                                    <td className={`p-2 border border-slate-400 font-bold text-lg ${(!pageBreakMode && !searchTerm && sortConfig.length === 0) ? 'cursor-move' : ''}`}>{toPersianNumerals(idx + 1)}</td>
+                                    <td className={`p-2 border border-slate-400 font-bold text-lg ${(!pageBreakMode && !searchTerm && sortConfig.length === 0 && !isViewer) ? 'cursor-move' : ''}`}>{toPersianNumerals(idx + 1)}</td>
                                     <td className="p-2 border border-slate-400 font-bold text-lg text-slate-900">{farmerName}</td>
                                     <td className="p-2 border border-slate-400 font-bold text-lg text-slate-900">
                                         {productMap.get(e.productId)}
@@ -631,6 +717,7 @@ const ExitPage: React.FC = () => {
                                         </div>
                                     </td>
                                 </tr>
+                                </React.Fragment>
                             );
                         })}
                     </tbody>
@@ -651,6 +738,22 @@ const ExitPage: React.FC = () => {
                     </tfoot>
                 </table>
             </div>
+
+            {productTotals.length > 0 && (
+                <div className="mt-3 mb-2 bg-white border border-slate-300 rounded-xl shadow-sm px-4 py-2 no-print">
+                    <div className="flex items-center flex-wrap gap-2 text-xs">
+                        <span className="font-bold text-slate-700">جمع محصولات روز:</span>
+                        {productTotals.map(p => (
+                            <span key={p.name} className="inline-flex items-center gap-1 bg-emerald-50 border border-emerald-200 text-emerald-900 rounded-lg px-2 py-1">
+                                <span className="font-bold">{p.name}</span>
+                                <span className="font-mono">{toPersianNumerals(Math.round(p.total).toLocaleString())}</span>
+                                <span className="text-[10px] text-slate-500">({toPersianNumerals(p.rows)} ردیف)</span>
+                            </span>
+                        ))}
+                        <span className="mr-auto text-slate-500">تعداد اقلام: {toPersianNumerals(productTotals.length)}</span>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

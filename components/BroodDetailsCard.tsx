@@ -14,11 +14,15 @@ interface BroodDetailsCardProps {
     farmer: Farmer;
     brood: Brood;
     allExits: Exit[];
-    onUpdate: (updatedBrood: Brood) => void;
-    onDelete: (broodId: string) => void;
+    onUpdate: (updatedBrood: Brood) => void | Promise<boolean | void>;
+    onDelete: (broodId: string) => void | Promise<boolean | void>;
+    /** Present when the card is rendered inside the recycle bin: shows «بازیابی» instead of delete. */
+    onRestore?: (broodId: string) => void | Promise<void>;
     onInvoiceUpdate?: () => void;
     showFarmerName?: boolean;
     isArchived?: boolean;
+    /** The period is soft-deleted: rendered grayed out and read-only. */
+    isDeletedBrood?: boolean;
 }
 
 const safeParseFloat = (val: any): number => {
@@ -26,7 +30,7 @@ const safeParseFloat = (val: any): number => {
     return isNaN(num) ? 0 : num;
 };
 
-const BroodDetailsCard: React.FC<BroodDetailsCardProps> = ({ farmer, brood, allExits, onUpdate, onDelete, onInvoiceUpdate, showFarmerName = false, isArchived = false }) => {
+const BroodDetailsCard: React.FC<BroodDetailsCardProps> = ({ farmer, brood, allExits, onUpdate, onDelete, onRestore, onInvoiceUpdate, showFarmerName = false, isArchived = false, isDeletedBrood = false }) => {
     const { settings, productMap } = useSettings();
     const { isViewer } = useAuth();
     const quotaMap = useMemo(() => new Map(settings.feedQuotas?.map(q => [q.productId, q.quotaPerChick])), [settings.feedQuotas]);
@@ -248,14 +252,20 @@ const BroodDetailsCard: React.FC<BroodDetailsCardProps> = ({ farmer, brood, allE
         setIsArchiveModalOpen(true);
     };
 
-    const handleConfirmArchive = () => {
+    const handleConfirmArchive = async () => {
         const updatedBrood = {
             ...brood,
             endDate: formatToISODate(archiveFormData.endDate),
             finalChickenWeight: archiveFormData.finalChickenWeight > 0 ? archiveFormData.finalChickenWeight : undefined
         };
-        onUpdate(updatedBrood);
         setIsArchiveModalOpen(false);
+        // AWAITED: the success dialog must never appear before the change is really persisted.
+        // (`false` means the write had to be queued for retry.)
+        const persisted = await onUpdate(updatedBrood);
+        if (persisted === false) {
+            Swal.fire('ذخیره نشد', 'بایگانی ذخیره نشد و در صف همگام‌سازی قرار گرفت؛ پس از برقراری اتصال اعمال می‌شود.', 'warning');
+            return;
+        }
         Swal.fire('بایگانی شد', 'دوره با موفقیت بسته و به لیست بایگانی منتقل شد.', 'success');
     };
 
@@ -267,10 +277,13 @@ const BroodDetailsCard: React.FC<BroodDetailsCardProps> = ({ farmer, brood, allE
             showCancelButton: true,
             confirmButtonText: 'بله، باز شود',
             cancelButtonText: 'لغو'
-        }).then((result: any) => {
+        }).then(async (result: any) => {
             if (result.isConfirmed) {
                 const updatedBrood = { ...brood, endDate: undefined };
-                onUpdate(updatedBrood);
+                const persisted = await onUpdate(updatedBrood);
+                if (persisted === false) {
+                    Swal.fire('ذخیره نشد', 'بازگشایی دوره ذخیره نشد و در صف همگام‌سازی قرار گرفت.', 'warning');
+                }
             }
         });
     };
@@ -489,7 +502,13 @@ const BroodDetailsCard: React.FC<BroodDetailsCardProps> = ({ farmer, brood, allE
 
 
     return (
-        <details className={`p-4 border rounded-xl shadow-sm hover:shadow-md transition-shadow group ${isArchived ? 'bg-slate-50 border-slate-300' : 'bg-white border-slate-200'}`} open>
+        <details className={`p-4 border rounded-xl shadow-sm transition-shadow group ${isDeletedBrood ? 'bg-slate-100 border-dashed border-slate-400 opacity-70' : isArchived ? 'bg-slate-50 border-slate-300' : 'bg-white border-slate-200 hover:shadow-md'}`} open>
+            {isDeletedBrood && (
+                <div className="mb-3 bg-slate-200 text-slate-700 text-xs font-bold rounded-lg px-3 py-2 flex items-center justify-between gap-2">
+                    <span>این دوره حذف شده است و در هیچ لیست، فرم یا گزارشی محاسبه نمی‌شود (قابل بازیابی).</span>
+                    {brood.deletedAt && <span className="font-mono text-[10px]" dir="ltr">{String(brood.deletedAt).slice(0, 19).replace('T', ' ')}</span>}
+                </div>
+            )}
             {/* --- Modals --- */}
             <Modal
                 isOpen={isEditModalOpen}
@@ -622,10 +641,18 @@ const BroodDetailsCard: React.FC<BroodDetailsCardProps> = ({ farmer, brood, allE
                         </div>
                         <div>
                             <label className="block text-sm font-medium text-slate-600 mb-1">محصول</label>
+                            {/* Same UX rule as the exit form: finished goods (what a farmer collects) first. */}
                             <select value={editInvoiceForm.productId} onChange={(e) => setEditInvoiceForm({...editInvoiceForm, productId: e.target.value})} className="w-full p-2 border rounded-lg">
-                                {settings.products.filter(p => !p.isDeleted).map(p => (
-                                    <option key={p.id} value={p.id}>{p.name}</option>
-                                ))}
+                                <optgroup label="محصولات نهایی">
+                                    {settings.products.filter(p => !p.isDeleted && p.type === 'finishedGood').map(p => (
+                                        <option key={p.id} value={p.id}>{p.name}</option>
+                                    ))}
+                                </optgroup>
+                                <optgroup label="مواد اولیه">
+                                    {settings.products.filter(p => !p.isDeleted && p.type === 'rawMaterial').map(p => (
+                                        <option key={p.id} value={p.id}>{p.name}</option>
+                                    ))}
+                                </optgroup>
                             </select>
                         </div>
                         <div>
@@ -652,6 +679,19 @@ const BroodDetailsCard: React.FC<BroodDetailsCardProps> = ({ farmer, brood, allE
                             </div>
                             <div>
                                 {showFarmerName && <h3 className={`text-lg font-bold ${isArchived ? 'text-slate-500' : 'text-slate-800'}`}>{farmer.name} {isArchived && <span className="text-xs font-normal text-slate-400 border border-slate-300 rounded px-1">(بایگانی)</span>}</h3>}
+                                {/* Phone right under the farmer's name: it is the value the operator
+                                    just searched for, so it must be visible without opening anything. */}
+                                {showFarmerName && (
+                                    <div className="text-sm text-slate-600 mt-1">
+                                        {farmer.phone && String(farmer.phone).trim() ? (
+                                            <span className="inline-block bg-sky-50 text-sky-900 border border-sky-200 px-2 py-0.5 rounded font-mono" dir="ltr" title="تلفن مرغدار">
+                                                ☎ {farmer.phone}
+                                            </span>
+                                        ) : (
+                                            <span className="text-slate-400 text-xs">تلفن ثبت نشده</span>
+                                        )}
+                                    </div>
+                                )}
                                 <div className="text-sm text-slate-500 mt-1 flex gap-2">
                                     <span className="bg-slate-100 px-2 py-0.5 rounded">شروع: {formatDate(brood.startDate)}</span>
                                     {brood.endDate && <span className="bg-slate-200 text-slate-600 px-2 py-0.5 rounded">پایان: {formatDate(brood.endDate)}</span>}
@@ -661,17 +701,36 @@ const BroodDetailsCard: React.FC<BroodDetailsCardProps> = ({ farmer, brood, allE
                         </div>
                         
                         <div className="flex items-center gap-1 opacity-80 group-hover:opacity-100 transition-opacity">
-                             <button onClick={handlePrintBrood} className="p-2 hover:bg-slate-100 rounded-full text-emerald-600" title="چاپ گزارش تفصیلی">
-                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                                    <path fillRule="evenodd" d="M5 4v3H4a2 2 0 00-2 2v3a2 2 0 002 2h1v2a2 2 0 002 2h6a2 2 0 002-2v-2h1a2 2 0 002-2V9a2 2 0 00-2-2h-1V4a2 2 0 00-2-2H7a2 2 0 00-2 2zm8 0H7v3h6V4zm0 8H7v4h6v-4z" clipRule="evenodd" />
-                                </svg>
-                            </button>
-                             {!isViewer && <button onClick={(e) => { e.stopPropagation(); handleOpenEditModal(); }} className="p-2 hover:bg-slate-100 rounded-full text-blue-500" title="ویرایش">
-                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" /></svg>
-                            </button>}
-                             {!isViewer && <button onClick={(e) => { e.stopPropagation(); onDelete(brood.id); }} className="p-2 hover:bg-slate-100 rounded-full text-red-500" title="حذف">
-                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" /></svg>
-                            </button>}
+                             {!isDeletedBrood && (
+                                 <button onClick={handlePrintBrood} className="p-2 hover:bg-slate-100 rounded-full text-emerald-600" title="چاپ گزارش تفصیلی">
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                        <path fillRule="evenodd" d="M5 4v3H4a2 2 0 00-2 2v3a2 2 0 002 2h1v2a2 2 0 002 2h6a2 2 0 002-2v-2h1a2 2 0 002-2V9a2 2 0 00-2-2h-1V4a2 2 0 00-2-2H7a2 2 0 00-2 2zm8 0H7v3h6V4zm0 8H7v4h6v-4z" clipRule="evenodd" />
+                                    </svg>
+                                </button>
+                             )}
+                             {/* A soft-deleted period is read-only: only «بازیابی» is offered, so an
+                                 accidental delete can never turn into accidental data loss. */}
+                             {isDeletedBrood ? (
+                                !isViewer && onRestore && (
+                                    <button
+                                        type="button"
+                                        onClick={(e) => { e.stopPropagation(); void onRestore(brood.id); }}
+                                        className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 whitespace-nowrap"
+                                        title="بازگرداندن این دوره به لیست فعال"
+                                    >
+                                        بازیابی
+                                    </button>
+                                )
+                             ) : (
+                                <>
+                                    {!isViewer && <button onClick={(e) => { e.stopPropagation(); handleOpenEditModal(); }} className="p-2 hover:bg-slate-100 rounded-full text-blue-500" title="ویرایش">
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" /></svg>
+                                    </button>}
+                                    {!isViewer && <button onClick={(e) => { e.stopPropagation(); onDelete(brood.id); }} className="p-2 hover:bg-slate-100 rounded-full text-red-500" title="حذف (قابل بازیابی)">
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" /></svg>
+                                    </button>}
+                                </>
+                             )}
                             <span className="text-slate-300 group-open:rotate-180 transition-transform text-sm mr-2">▼</span>
                         </div>
                     </div>

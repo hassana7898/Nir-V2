@@ -500,9 +500,11 @@ const SettingsPage: React.FC = () => {
                 const { invoiceCount } = await dataService.mergeFarmers(sourceFarmerId, targetFarmerId);
                 showToast(`ادغام با موفقیت انجام شد. ${toPersianNumerals(invoiceCount)} حواله منتقل شد.`);
                 refreshPageData();
-            } catch(e) {
+            } catch(e: any) {
                 console.error(e);
-                showToast('خطا در هنگام ادغام.', 'error');
+                // The server refuses a merge it cannot apply in one transaction (e.g. offline),
+                // so the real reason is shown instead of a generic message.
+                showToast(e?.message || 'خطا در هنگام ادغام.', 'error');
             }
         }
     };
@@ -782,6 +784,35 @@ const SettingsPage: React.FC = () => {
                                 <span className="text-sm font-bold text-slate-700">فعال‌سازی چاپ پررنگ (Bold) برای تمام گزارش‌ها و حواله‌ها</span>
                             </label>
                         </div>
+                        {isAdmin && (
+                            <div className="md:col-span-2 mt-2 border-t pt-4">
+                                <h4 className="text-sm font-bold text-slate-700 mb-1">نمایش منوهای نرم‌افزار (فقط مدیر سیستم)</h4>
+                                <p className="text-[11px] text-slate-500 mb-3">
+                                    منوهایی که خاموش شوند از نوار کناری همه‌ی کاربران حذف می‌شوند و آدرس مستقیم آن‌ها به داشبورد هدایت می‌شود.
+                                </p>
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                    {([
+                                        { key: 'warehouses', label: 'انبارداری' },
+                                        { key: 'inventoryAnalysis', label: 'آنالیز انبار' },
+                                        { key: 'production', label: 'تولید' },
+                                        { key: 'weighbridge', label: 'مدیریت باسکول' },
+                                    ] as const).map(item => (
+                                        <label key={item.key} className="inline-flex items-center gap-2 cursor-pointer bg-slate-50 px-3 py-2 rounded-lg border border-slate-200 hover:bg-slate-100">
+                                            <input
+                                                type="checkbox"
+                                                checked={formState.enabledMenus?.[item.key] !== false}
+                                                onChange={(e) => setFormState(prev => ({
+                                                    ...prev,
+                                                    enabledMenus: { ...(prev.enabledMenus || {}), [item.key]: e.target.checked },
+                                                }))}
+                                                className="w-5 h-5 text-blue-600 rounded focus:ring-blue-500 border-gray-300"
+                                            />
+                                            <span className="text-sm font-bold text-slate-700">{item.label}</span>
+                                        </label>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
 

@@ -10,12 +10,22 @@ export type ApiErrorCode =
   | 'UNKNOWN_PRODUCT'
   | 'UNKNOWN_FARMER'
   | 'IDEMPOTENCY_KEY_REUSE'
-  | 'OFFLINE';
+  | 'OFFLINE'
+  // Client-side classifications (never produced by the server): the sync engine needs to
+  // tell a transient connectivity/timeout failure apart from a permanently rejected payload.
+  | 'TIMEOUT'
+  | 'NETWORK';
 
 export type ApiError = {
   code: ApiErrorCode;
   message: string;
   details?: Record<string, any>;
+  /**
+   * HTTP status that produced this error, when known.
+   * The outbox uses it to decide whether a rejected mutation is permanent (400/422 => the
+   * payload will never be accepted, so it must not be retried forever) or transient.
+   */
+  status?: number;
 };
 
 export type ApiResponse<T> =

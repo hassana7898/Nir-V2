@@ -6,6 +6,10 @@ import { useSettings } from '../contexts/SettingsContext';
 import { toPersianNumerals, formatDate, formatToISODate } from '../utils/formatters';
 import { showToast } from '../utils/helpers';
 import BroodDetailsCard from '../components/BroodDetailsCard';
+import FarmerDataRepairPanel from '../components/FarmerDataRepairPanel';
+import { normalizePersianText, normalizePhone } from '../shared/persianText';
+import { activeBroods, deletedBroods, isBroodDeleted } from '../shared/broodMerge';
+import { confirmTypedDelete } from '../utils/confirmDelete';
 import Modal from '../components/Modal';
 import DatePicker from '../components/DatePicker';
 import Swal from 'sweetalert2';
@@ -17,7 +21,9 @@ const FarmersPage: React.FC = () => {
     const [selectedFarmer, setSelectedFarmer] = useState<Farmer | null>(null);
     const [allExits, setAllExits] = useState<Exit[]>([]);
     const [showHiddenFarmers, setShowHiddenFarmers] = useState(false);
+    const [farmerSearch, setFarmerSearch] = useState('');
     const [selectedFarmerIdsForBulk, setSelectedFarmerIdsForBulk] = useState<Set<string>>(new Set());
+    const [showDeletedBroods, setShowDeletedBroods] = useState(false);
     
     // Add Brood Modal State
     const [isAddBroodModalOpen, setIsAddBroodModalOpen] = useState(false);
@@ -44,12 +50,15 @@ const FarmersPage: React.FC = () => {
         fetchData();
     }, []);
 
-    const handleSaveFarmers = async (updatedFarmers: Farmer[], logActionType?: 'created' | 'updated' | 'deleted', farmerForLog?: Farmer) => {
-        dataService.saveFarmers(updatedFarmers);
+    const handleSaveFarmers = async (updatedFarmers: Farmer[], logActionType?: 'created' | 'updated' | 'deleted', farmerForLog?: Farmer): Promise<boolean> => {
+        // saveFarmers now persists the diff to PostgreSQL (POST/PUT/DELETE) and queues failures,
+        // so the result tells the caller whether the change is safe.
+        const persisted = await dataService.saveFarmers(updatedFarmers);
         if (logActionType && farmerForLog) {
             await dataService.logAction(logActionType, 'farmer', farmerForLog);
         }
         fetchData();
+        return persisted;
     };
 
     const handleAddFarmer = () => {
@@ -62,22 +71,58 @@ const FarmersPage: React.FC = () => {
             confirmButtonText: 'افزودن',
             cancelButtonText: 'لغو',
             preConfirm: (name: string) => {
-                if (!name) {
+                // Sanitise first (trim + Arabic->Persian), then look for an existing twin.
+                const clean = normalizePersianText(name);
+                if (!clean) {
                     Swal.showValidationMessage('نام مرغدار نمی‌تواند خالی باشد');
+                    return false;
                 }
-                return name;
+                const duplicate = dataService.findDuplicateFarmer(clean);
+                if (duplicate && duplicate.kind === 'exact') {
+                    Swal.showValidationMessage(`این مرغدار قبلاً ثبت شده است: «${duplicate.name}». برای یکی‌کردن سوابق از بخش «بهبود داده‌ها» استفاده کنید.`);
+                    return false;
+                }
+                return clean;
             }
-        }).then((result: any) => {
-            if (result.isConfirmed) {
-                const newFarmer: Farmer = {
-                    id: `farmer_${Date.now()}`,
-                    name: result.value,
-                    broods: [],
-                };
-                const updatedFarmers = [...farmers, newFarmer];
-                handleSaveFarmers(updatedFarmers, 'created', newFarmer);
-                showToast('مرغدار جدید با موفقیت اضافه شد');
+        }).then(async (result: any) => {
+            if (!result.isConfirmed) return;
+            const cleanName: string = result.value;
+
+            // "Did you mean X?" - a close (typo/variant) match is offered for merging instead of
+            // silently creating yet another row for the same person.
+            const suggestion = dataService.findDuplicateFarmer(cleanName);
+            if (suggestion && suggestion.kind === 'close') {
+                const choice = await Swal.fire({
+                    title: 'مرغدار مشابه پیدا شد',
+                    html: `<div style="text-align:right;font-size:13px">
+                        <p>منظور شما <strong>«${suggestion.name}»</strong> بود؟</p>
+                        <p style="color:#64748b;margin-top:6px">این مرغدار ${toPersianNumerals(suggestion.invoiceCount)} حواله دارد. اگر همان شخص است، مرغدار تکراری ثبت نمی‌شود.</p>
+                    </div>`,
+                    icon: 'question',
+                    showDenyButton: true,
+                    showCancelButton: true,
+                    confirmButtonText: `بله، همان «${suggestion.name}» است`,
+                    denyButtonText: 'شخص دیگری است؛ ثبت کن',
+                    cancelButtonText: 'لغو',
+                    confirmButtonColor: '#0284c7',
+                    denyButtonColor: '#059669',
+                });
+                if (choice.isDismissed) return;
+                if (choice.isConfirmed) {
+                    setSelectedFarmer(suggestion.farmer);
+                    showToast(`«${suggestion.name}» انتخاب شد (مرغدار جدیدی ثبت نشد).`, 'info');
+                    return;
+                }
             }
+
+            const newFarmer: Farmer = {
+                id: `farmer_${Date.now()}`,
+                name: cleanName,
+                broods: [],
+            };
+            const updatedFarmers = [...farmers, newFarmer];
+            handleSaveFarmers(updatedFarmers, 'created', newFarmer);
+            showToast('مرغدار جدید با موفقیت اضافه شد');
         });
     };
 
@@ -90,6 +135,19 @@ const FarmersPage: React.FC = () => {
             showCancelButton: true,
             confirmButtonText: 'ذخیره',
             cancelButtonText: 'لغو',
+            preConfirm: (name: string) => {
+                const clean = normalizePersianText(name);
+                if (!clean) {
+                    Swal.showValidationMessage('نام مرغدار نمی‌تواند خالی باشد');
+                    return false;
+                }
+                const duplicate = dataService.findDuplicateFarmer(clean, farmer.id);
+                if (duplicate) {
+                    Swal.showValidationMessage(`مرغدار مشابهی وجود دارد: «${duplicate.name}». برای ادغام از بخش «بهبود داده‌ها» استفاده کنید.`);
+                    return false;
+                }
+                return clean;
+            }
         }).then((result: any) => {
             if (result.isConfirmed) {
                 const updatedFarmers = farmers.map(f => f.id === farmer.id ? { ...f, name: result.value } : f);
@@ -148,9 +206,21 @@ const FarmersPage: React.FC = () => {
 
     const filteredFarmers = useMemo(() => {
         let list = farmers.filter(f => !f.isDeleted);
-        if (showHiddenFarmers) return list;
-        return list.filter(f => !f.isHidden);
-    }, [farmers, showHiddenFarmers]);
+        if (!showHiddenFarmers) list = list.filter(f => !f.isHidden);
+
+        // Search by farmer name OR phone number (digits-only comparison so "0912" finds "0912 345 6789")
+        const term = farmerSearch.trim().toLowerCase();
+        if (!term) return list;
+        const digits = term.replace(/\D/g, '');
+        return list.filter(f => {
+            const nameMatch = String(f.name || '').toLowerCase().includes(term);
+            const phone = String((f as any).phone || '');
+            const phoneMatch = digits.length > 1
+                ? phone.replace(/\D/g, '').includes(digits) || phone.toLowerCase().includes(term)
+                : false;
+            return nameMatch || phoneMatch;
+        });
+    }, [farmers, showHiddenFarmers, farmerSearch]);
 
 
     const handleOpenAddBroodModal = () => {
@@ -161,7 +231,7 @@ const FarmersPage: React.FC = () => {
         setIsAddBroodModalOpen(true);
     };
 
-    const handleConfirmAddBrood = () => {
+    const handleConfirmAddBrood = async () => {
         if (!selectedFarmer) return;
         if (!newBroodChickCount || newBroodChickCount <= 0) {
             showToast('تعداد جوجه باید عدد مثبت باشد', 'error');
@@ -169,7 +239,10 @@ const FarmersPage: React.FC = () => {
         }
 
         const newBrood: Brood = {
-            id: `brood_${Date.now()}`,
+            // Collision-proof id: two farmers can no longer end up with the same brood id (the old
+            // `brood_${Date.now()}` collided for periods created in the same millisecond, which made
+            // update/delete hit the WRONG farmer's period).
+            id: `brood_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
             startDate: formatToISODate(newBroodStartDate),
             chickCount: newBroodChickCount,
             startInvoiceId: newBroodStartInvoiceId || undefined,
@@ -178,52 +251,67 @@ const FarmersPage: React.FC = () => {
         };
         const updatedFarmers = farmers.map(f => 
             f.id === selectedFarmer.id 
-                ? { ...f, broods: [...f.broods, newBrood].sort((a,b) => new Date(b.startDate).getTime() - new Date(a.startDate).getTime()) } 
+                ? { ...f, broods: [...(f.broods || []), newBrood].sort((a,b) => new Date(b.startDate).getTime() - new Date(a.startDate).getTime()) } 
                 : f
         );
-        handleSaveFarmers(updatedFarmers, 'updated', selectedFarmer);
-        showToast('دوره جدید با موفقیت ثبت شد');
         setIsAddBroodModalOpen(false);
+        const persisted = await handleSaveFarmers(updatedFarmers, 'updated', selectedFarmer);
+        if (persisted) showToast('دوره جدید با موفقیت ثبت شد');
+        else showToast('ثبت دوره ناموفق بود؛ در صف همگام‌سازی قرار گرفت.', 'warning');
     };
     
-    const handleUpdateBrood = (updatedBrood: Brood) => {
-        if (!selectedFarmer) return;
+    const handleUpdateBrood = async (updatedBrood: Brood) => {
+        if (!selectedFarmer) return false;
          const updatedFarmers = farmers.map(f => {
             if (f.id === selectedFarmer.id) {
                 return {
                     ...f,
-                    broods: f.broods.map(b => b.id === updatedBrood.id ? updatedBrood : b)
+                    broods: (f.broods || []).map(b => (b && b.id === updatedBrood.id ? updatedBrood : b))
                 };
             }
             return f;
         });
-        handleSaveFarmers(updatedFarmers, 'updated', selectedFarmer);
-        showToast('اطلاعات دوره به‌روزرسانی شد');
+        const persisted = await handleSaveFarmers(updatedFarmers, 'updated', selectedFarmer);
+        if (persisted) showToast('اطلاعات دوره به‌روزرسانی شد');
+        else showToast('ذخیره تغییرات دوره ناموفق بود؛ در صف همگام‌سازی قرار گرفت.', 'warning');
+        return persisted;
     };
     
-    const handleDeleteBrood = (broodId: string) => {
+    const handleDeleteBrood = async (broodId: string) => {
         if (!selectedFarmer) return;
+        const brood = (selectedFarmer.broods || []).find(b => b && b.id === broodId);
+        if (!brood) return;
 
-        Swal.fire({
-            title: 'آیا از حذف این دوره مطمئن هستید؟',
-            text: 'این عملیات غیرقابل بازگشت است.',
-            icon: 'warning',
-            showCancelButton: true,
-            confirmButtonColor: '#d33',
-            confirmButtonText: 'بله، حذف کن',
-            cancelButtonText: 'لغو'
-        }).then((result: any) => {
-            if (result.isConfirmed) {
-                const updatedFarmers = farmers.map(f => {
-                    if (f.id === selectedFarmer.id) {
-                        return { ...f, broods: f.broods.filter(b => b.id !== broodId) };
-                    }
-                    return f;
-                });
-                handleSaveFarmers(updatedFarmers, 'updated', selectedFarmer); 
-                showToast('دوره با موفقیت حذف شد.');
-            }
+        // STRICT confirmation: the delete button stays disabled until the user types «تایید», and the
+        // period is only SOFT-deleted (restorable from the recycle bin) - never physically removed.
+        const confirmed = await confirmTypedDelete({
+            title: 'حذف دوره جوجه‌ریزی',
+            html: `<div style="text-align:right;font-size:13px">
+                <p>دوره <strong>${formatDate(brood.startDate)}</strong> — ${toPersianNumerals(brood.chickCount || 0)} قطعه</p>
+                <p style="color:#475569;margin-top:8px">این دوره از لیست‌ها و فرم‌ها پنهان می‌شود، اما <strong>حذف فیزیکی نمی‌شود</strong> و از بخش «دوره‌های حذف‌شده» قابل بازیابی است.</p>
+            </div>`,
+            confirmButtonText: 'حذف دوره',
         });
+        if (!confirmed) return;
+
+        try {
+            await dataService.deleteBrood(selectedFarmer.id, broodId);
+            showToast('دوره حذف شد (قابل بازیابی از «دوره‌های حذف‌شده»).', 'info');
+            fetchData();
+        } catch (e: any) {
+            showToast(e?.message || 'حذف دوره ناموفق بود.', 'error');
+        }
+    };
+
+    const handleRestoreBrood = async (broodId: string) => {
+        if (!selectedFarmer) return;
+        try {
+            await dataService.restoreBrood(selectedFarmer.id, broodId);
+            showToast('دوره بازیابی شد.', 'success');
+            fetchData();
+        } catch (e: any) {
+            showToast(e?.message || 'بازیابی دوره ناموفق بود.', 'error');
+        }
     };
 
     const FarmerListItem: React.FC<{ farmer: Farmer }> = ({ farmer }) => {
@@ -254,6 +342,13 @@ const FarmersPage: React.FC = () => {
                         />
                         <div>
                             <span className="font-semibold">{farmer.name}</span>
+                            {/* The phone belongs directly under the name: it is what the operator
+                                searched for, and it must be readable at a glance. */}
+                            {farmer.phone && String(farmer.phone).trim() ? (
+                                <span className="block text-xs font-mono text-sky-800 mt-0.5" dir="ltr">☎ {farmer.phone}</span>
+                            ) : (
+                                <span className="block text-[11px] text-slate-400 mt-0.5">تلفن ثبت نشده</span>
+                            )}
                             {lastExit && (
                                 <p className="text-xs text-slate-500 mt-1">
                                     آخرین ارسال: {productMap.get(lastExit.productId)} در تاریخ {formatDate(lastExit.date)}
@@ -358,7 +453,20 @@ const FarmersPage: React.FC = () => {
                         {!isViewer && selectedFarmerIdsForBulk.size > 0 && (
                             <button onClick={handleBulkDeleteFarmers} className="text-xs text-red-500 hover:font-bold">حذف ({selectedFarmerIdsForBulk.size})</button>
                         )}
-                        <button onClick={() => setShowHiddenFarmers(!showHiddenFarmers)} className="text-xs text-slate-600 hover:text-black">
+                        <div className="flex items-center gap-2 mb-3">
+                    <input
+                        type="text"
+                        value={farmerSearch}
+                        onChange={e => setFarmerSearch(e.target.value)}
+                        placeholder="جست‌وجوی نام یا شماره تلفن مرغدار..."
+                        className="p-2 border rounded-lg text-sm w-full max-w-xs bg-slate-50 focus:bg-white transition-colors"
+                    />
+                    {farmerSearch && (
+                        <button onClick={() => setFarmerSearch('')} className="text-xs text-slate-500 hover:text-slate-700 whitespace-nowrap">پاک کردن</button>
+                    )}
+                    <span className="text-[11px] text-slate-400 whitespace-nowrap">{filteredFarmers.length} مرغدار</span>
+                </div>
+                <button onClick={() => setShowHiddenFarmers(!showHiddenFarmers)} className="text-xs text-slate-600 hover:text-black">
                             {showHiddenFarmers ? 'نمایش فعال‌ها' : 'نمایش همه'}
                         </button>
                         {!isViewer && (
@@ -366,6 +474,7 @@ const FarmersPage: React.FC = () => {
                         )}
                     </div>
                 </div>
+                <FarmerDataRepairPanel farmers={farmers} allExits={allExits} onChanged={fetchData} />
                 <ul className="overflow-y-auto flex-grow">
                     {filteredFarmers.map(farmer => <FarmerListItem key={farmer.id} farmer={farmer} />)}
                 </ul>
@@ -375,16 +484,26 @@ const FarmersPage: React.FC = () => {
                 {selectedFarmer ? (
                     <div>
                          <div className="flex justify-between items-center mb-4">
-                            <h2 className="text-2xl font-bold text-slate-800">{selectedFarmer.name}</h2>
+                            <div>
+                                <h2 className="text-2xl font-bold text-slate-800">{selectedFarmer.name}</h2>
+                                {/* Same rule as the list: the phone is shown under the name. */}
+                                {selectedFarmer.phone && String(selectedFarmer.phone).trim() ? (
+                                    <div className="text-sm font-mono text-sky-800 mt-1" dir="ltr">☎ {selectedFarmer.phone}</div>
+                                ) : (
+                                    <div className="text-xs text-slate-400 mt-1">تلفن ثبت نشده</div>
+                                )}
+                            </div>
                             {!isViewer && (
                                 <button onClick={handleOpenAddBroodModal} className="bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600">ثبت دوره جوجه‌ریزی جدید</button>
                             )}
                         </div>
                         <div className="space-y-4">
-                            {selectedFarmer.broods.length === 0 ? (
+                            {/* ACTIVE periods only. Soft-deleted ones live in the recycle bin below, so
+                                they can never appear in an active list, dropdown or invoice form. */}
+                            {activeBroods<Brood>(selectedFarmer.broods).length === 0 ? (
                                 <p className="text-center text-slate-500 pt-10">هنوز دوره‌ای برای این مرغدار ثبت نشده است.</p>
                             ) : (
-                                selectedFarmer.broods.map(brood => (
+                                activeBroods<Brood>(selectedFarmer.broods).map(brood => (
                                     <BroodDetailsCard 
                                         key={brood.id} 
                                         farmer={selectedFarmer} 
@@ -395,6 +514,42 @@ const FarmersPage: React.FC = () => {
                                         isArchived={!!brood.endDate}
                                     />
                                 ))
+                            )}
+
+                            {/* RECYCLE BIN: soft-deleted periods, visually distinct, restorable. */}
+                            {deletedBroods<Brood>(selectedFarmer.broods).length > 0 && (
+                                <div className="border border-slate-300 rounded-xl overflow-hidden">
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowDeletedBroods(v => !v)}
+                                        className="w-full flex items-center justify-between gap-2 bg-slate-100 px-4 py-2 text-right hover:bg-slate-200"
+                                    >
+                                        <span className="flex items-center gap-2 text-sm font-bold text-slate-600">
+                                            <span className={`transition-transform ${showDeletedBroods ? 'rotate-90' : ''}`}>▾</span>
+                                            نمایش دوره‌های حذف شده (سلة بازیافت)
+                                        </span>
+                                        <span className="text-xs bg-slate-300 text-slate-700 rounded-full px-2 py-0.5">
+                                            {toPersianNumerals(deletedBroods<Brood>(selectedFarmer.broods).length)}
+                                        </span>
+                                    </button>
+                                    {showDeletedBroods && (
+                                        <div className="p-3 space-y-3 bg-slate-50">
+                                            {deletedBroods<Brood>(selectedFarmer.broods).map(brood => (
+                                                <BroodDetailsCard
+                                                    key={`deleted-${brood.id}`}
+                                                    farmer={selectedFarmer}
+                                                    brood={brood}
+                                                    allExits={allExits}
+                                                    onUpdate={handleUpdateBrood}
+                                                    onDelete={handleDeleteBrood}
+                                                    onRestore={handleRestoreBrood}
+                                                    isArchived={!!brood.endDate}
+                                                    isDeletedBrood={true}
+                                                />
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
                             )}
                         </div>
                     </div>

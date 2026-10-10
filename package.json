@@ -10,10 +10,16 @@
         "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
         "preview": "vite preview",
         "build:deploy": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=bundle --external:vite --external:pg-native --external:@electric-sql/pglite --external:drizzle-orm/pglite --external:drizzle-orm/pglite/migrator --sourcemap --outfile=dist/server.cjs",
+        "build:worker": "esbuild workers/weighbridge-worker.ts --bundle --platform=node --format=cjs --packages=bundle --external:vite --external:pg-native --alias:@azure/identity=./workers/stubs/optional-deps.cjs --alias:msnodesqlv8=./workers/stubs/optional-deps.cjs --alias:kerberos=./workers/stubs/optional-deps.cjs --alias:snappy=./workers/stubs/optional-deps.cjs --outfile=dist/weighbridge-worker.cjs",
+        "build:weighbridge": "npm run build:deploy && npm run build:worker",
         "db:migrate": "tsx server/db/migrate.ts",
         "start:prod": "node dist/server.cjs",
-        "test": "tsx tests/syncQueue.test.ts",
-        "test:sync": "tsx tests/syncQueue.test.ts"
+        "test": "tsx tests/syncQueue.test.ts && tsx tests/multiSort.test.ts && tsx tests/tableSortEdges.test.ts && tsx tests/farmerNames.test.ts && tsx tests/broodMerge.test.ts && tsx tests/farmerMerge.test.ts",
+        "test:sync": "tsx tests/syncQueue.test.ts",
+        "test:sort": "tsx tests/multiSort.test.ts",
+        "test:names": "tsx tests/farmerNames.test.ts",
+        "test:broods": "tsx tests/broodMerge.test.ts",
+        "test:merge": "tsx tests/farmerMerge.test.ts"
     },
     "dependencies": {
         "@google/genai": "^1.52.0",
@@ -24,6 +30,7 @@
         "express": "^5.2.1",
         "idb": "^8.0.3",
         "jsonwebtoken": "^9.0.3",
+        "mssql": "^11.0.2",
         "multer": "^2.3.0",
         "node-cron": "^4.6.0",
         "otplib": "^13.5.0",

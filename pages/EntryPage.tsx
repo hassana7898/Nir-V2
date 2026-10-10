@@ -6,6 +6,7 @@ import * as dataService from '../services/dataService';
 import { useSettings } from '../contexts/SettingsContext';
 import { toPersianNumerals, formatWastage, formatToISODate, formatDateWithWeekday, formatCurrency, formatIBANForDisplay } from '../utils/formatters';
 import { showToast } from '../utils/helpers';
+import { sortRows, nextSortSpecs, debugSort } from '../utils/tableSort';
 import { handlePrint, calculatePrintPages } from '../utils/print';
 import Modal from '../components/Modal';
 import Swal from 'sweetalert2';
@@ -50,7 +51,7 @@ const EntryPage: React.FC = () => {
     const [showGrandTotal, setShowGrandTotal] = useState(true);
     const [pageSettings, setPageSettings] = useState<{title: string, description: string}[]>([]);
 
-    const { settings, productMap } = useSettings();
+    const { settings, productMap, saveSettings } = useSettings();
     const tableBodyRef = useRef<HTMLTableSectionElement>(null);
     const sortableInstance = useRef<any | null>(null);
     const firstInputRef = useRef<HTMLInputElement>(null);
@@ -99,6 +100,15 @@ const EntryPage: React.FC = () => {
     }, [currentDate]);
 
     useEffect(() => { fetchEntries(); }, [fetchEntries]);
+
+    // Device-sync fix: the server's `sort_order` is authoritative. When hydration rebuilt a day's
+    // layout from it, re-read the day immediately so this device matches the other device that
+    // last saved the order (instead of showing a stale local layout).
+    useEffect(() => {
+        const onOrderSynced = () => fetchEntries();
+        window.addEventListener(dataService.ORDER_SYNCED_EVENT, onOrderSynced);
+        return () => window.removeEventListener(dataService.ORDER_SYNCED_EVENT, onOrderSynced);
+    }, [fetchEntries]);
     
     useEffect(() => {
         const timerId = setTimeout(() => { setDebouncedSearchTerm(searchTerm); }, 300);
@@ -106,33 +116,9 @@ const EntryPage: React.FC = () => {
     }, [searchTerm]);
 
     const handleSort = (key: SortableKeys, event: React.MouseEvent) => {
-        setSortConfig(prev => {
-            const existingIndex = prev.findIndex(s => s.key === key);
-            let newConfig = [...prev];
-
-            if (event.shiftKey) {
-                if (existingIndex > -1) {
-                    if (prev[existingIndex].direction === 'asc') {
-                        newConfig[existingIndex].direction = 'desc';
-                    } else {
-                        newConfig.splice(existingIndex, 1);
-                    }
-                } else {
-                    newConfig.push({ key, direction: 'asc' });
-                }
-            } else {
-                if (existingIndex > -1 && prev.length === 1) {
-                    if (prev[0].direction === 'asc') {
-                        newConfig = [{ key, direction: 'desc' }];
-                    } else {
-                        newConfig = [];
-                    }
-                } else {
-                    newConfig = [{ key, direction: 'asc' }];
-                }
-            }
-            return newConfig;
-        });
+        // Multi-sort (Shift = add a secondary level) is pure STATE: the shared helper returns a
+        // fresh config and never touches the rows. See utils/tableSort for the row-integrity rule.
+        setSortConfig(prev => nextSortSpecs<SortableKeys>(prev, key, event.shiftKey));
     };
 
     const filteredEntries = useMemo(() => {
@@ -149,29 +135,91 @@ const EntryPage: React.FC = () => {
         }
 
         if (sortConfig.length > 0) {
-            result.sort((a, b) => {
-                for (const sort of sortConfig) {
-                    let aVal: any, bVal: any;
-                    
-                    if (sort.key === 'productId') {
-                        aVal = productOrderMap.get(a.productId) ?? 999;
-                        bVal = productOrderMap.get(b.productId) ?? 999;
-                    } else {
-                        aVal = (a as any)[sort.key];
-                        bVal = (b as any)[sort.key];
-                    }
-
-                    if (aVal === undefined || aVal === null) aVal = '';
-                    if (bVal === undefined || bVal === null) bVal = '';
-
-                    if (aVal < bVal) return sort.direction === 'asc' ? -1 : 1;
-                    if (aVal > bVal) return sort.direction === 'asc' ? 1 : -1;
-                }
-                return dataService.createdMs(a) - dataService.createdMs(b);
-            });
+            // ROW INTEGRITY: the WHOLE invoice objects are sorted (`sortRows` copies the array and
+            // reorders object references). Column values are only ever READ from the row they
+            // belong to, so a multi-level sort can never attach one farmer's name to another
+            // farmer's weights.
+            result = debugSort<Entry>(
+                'entry',
+                sortRows<Entry, SortableKeys>(
+                    result,
+                    sortConfig,
+                    { productId: (e) => productOrderMap.get(e.productId) ?? 999 },
+                    (a, b) => dataService.createdMs(a) - dataService.createdMs(b),
+                ),
+                entries,
+                sortConfig as any,
+                ['id', 'sellerName', 'productId', 'billWeight', 'scaleWeight', 'driverName'],
+            );
         }
         return result;
     }, [entries, debouncedSearchTerm, productMap, sortConfig, productOrderMap]);
+
+    // --- Dedicated page title, visible in the UI (not only in the print preview) -------------
+    // Effective title = an explicit first-page override from the print panel, else the page's
+    // dedicated title from Settings - which is persisted (debounced) so it survives a reload.
+    const [titleDraft, setTitleDraft] = useState(settings.entryPrintTitle || '');
+    const titleSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    useEffect(() => { setTitleDraft(settings.entryPrintTitle || ''); }, [settings.entryPrintTitle]);
+    useEffect(() => () => { if (titleSaveTimer.current) clearTimeout(titleSaveTimer.current); }, []);
+
+    const commitTitle = (value: string, immediate = false) => {
+        setTitleDraft(value);
+        if (titleSaveTimer.current) clearTimeout(titleSaveTimer.current);
+        const persist = () => saveSettings({ ...settings, entryPrintTitle: value });
+        if (immediate) persist();
+        else titleSaveTimer.current = setTimeout(persist, 800);
+    };
+
+    const effectiveTitle = (pageSettings[0]?.title || '').trim() || titleDraft.trim() || 'فرم ورود روزانه';
+
+    // --- Per-product totals of the rendered (filtered) view ----------------------------------
+    const productTotals = useMemo(() => {
+        const map = new Map<string, { name: string; total: number; rows: number }>();
+        filteredEntries.forEach(e => {
+            const key = e.productId || '-';
+            const bucket = map.get(key) || { name: productMap.get(key) || key, total: 0, rows: 0 };
+            bucket.total += Number(e.scaleWeight || 0);
+            bucket.rows += 1;
+            map.set(key, bucket);
+        });
+        return Array.from(map.values()).sort((a, b) => b.total - a.total);
+    }, [filteredEntries, productMap]);
+
+    // --- Per-page print titles, editable INLINE in the main UI -------------------------------
+    // The split uses the exact rule of the print engine (calculatePrintPages): a row flagged
+    // `isPageBreak` starts a new page, and `offset` is that page's first row index. Page 1's title
+    // stays the master bar above the table; every later page gets its own input at its block start.
+    const pageTitleSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    useEffect(() => () => { if (pageTitleSaveTimer.current) clearTimeout(pageTitleSaveTimer.current); }, []);
+
+    const pageStarts = useMemo(() => {
+        const map = new Map<number, number>(); // rowIndex -> pageIndex (pages 2..n only)
+        calculatePrintPages(filteredEntries).forEach((page, pageIndex) => {
+            if (pageIndex > 0 && page.offset < filteredEntries.length) map.set(page.offset, pageIndex);
+        });
+        return map;
+    }, [filteredEntries]);
+
+    const pageTitleValue = (pageIndex: number): string => {
+        const live = pageSettings[pageIndex]?.title;
+        if (live !== undefined) return live;
+        return settings.entryPageTitles?.[pageIndex] || '';
+    };
+
+    const setPageTitle = (pageIndex: number, value: string, immediate = false) => {
+        const next = [...pageSettings];
+        if (!next[pageIndex]) next[pageIndex] = { title: '', description: '' };
+        next[pageIndex] = { ...next[pageIndex], title: value };
+        setPageSettings(next);
+
+        const titles = next.map(p => p?.title || '');
+        if (pageTitleSaveTimer.current) clearTimeout(pageTitleSaveTimer.current);
+        // Same persistence path as the master title: debounced, flushed on blur.
+        if (immediate) saveSettings({ ...settings, entryPageTitles: titles });
+        else pageTitleSaveTimer.current = setTimeout(() => saveSettings({ ...settings, entryPageTitles: titles }), 800);
+    };
 
     const totals = useMemo(() => {
         return filteredEntries.reduce((acc, item) => ({
@@ -184,17 +232,29 @@ const EntryPage: React.FC = () => {
     useEffect(() => {
         if (tableBodyRef.current) {
             if (sortableInstance.current) sortableInstance.current.destroy();
-            const isDnDDisabled = pageBreakMode || !!debouncedSearchTerm.trim();
+            // A (multi-)SORTED table is a VIEW. Manual reordering is therefore disabled while a
+            // sort is active: writing the on-screen order back into the stored list is exactly
+            // what used to scramble rows (the view order and the data order are not the same).
+            const isDnDDisabled = pageBreakMode || !!debouncedSearchTerm.trim() || isViewer || sortConfig.length > 0;
             
             sortableInstance.current = Sortable.create(tableBodyRef.current, {
                 animation: 150,
                 handle: '.cursor-move',
+                // The rendered body also contains per-page title rows. They are excluded from
+                // dragging, and the reorder math uses the DRAggable indices so the inserted rows
+                // can never shift the order of the real invoice rows.
+                filter: '.page-title-row',
                 disabled: isDnDDisabled,
                 onEnd: (evt: any) => {
-                    const { oldIndex, newIndex } = evt;
+                    // Defensive guard: never reorder while a sort config exists.
+                    if (sortConfig.length > 0) return;
+                    const oldIndex = evt.oldDraggableIndex !== undefined ? evt.oldDraggableIndex : evt.oldIndex;
+                    const newIndex = evt.newDraggableIndex !== undefined ? evt.newDraggableIndex : evt.newIndex;
                     if (oldIndex === undefined || newIndex === undefined || oldIndex === newIndex) return;
                     
-                    const newOrdered = [...filteredEntries];
+                    // Reorder the WHOLE stored list (row objects) - never the filtered view, which
+                    // would drop the rows the search box is hiding.
+                    const newOrdered = [...entries];
                     const [movedItem] = newOrdered.splice(oldIndex, 1);
                     newOrdered.splice(newIndex, 0, movedItem);
                     
@@ -213,7 +273,7 @@ const EntryPage: React.FC = () => {
                 sortableInstance.current = null;
             }
         };
-    }, [filteredEntries, debouncedSearchTerm, pageBreakMode, sortConfig]);
+    }, [entries, filteredEntries, debouncedSearchTerm, pageBreakMode, sortConfig]);
 
     const handleSaveOrder = async () => {
         if (!!searchTerm) {
@@ -253,6 +313,10 @@ const EntryPage: React.FC = () => {
         setIsBulkMoveModalOpen(true);
     };
 
+    // Live deduction (افت) for the form. Derived, never stored: the next row of "add another"
+    // therefore recalculates it purely from its own two weights.
+    const derivedWastage = (Number(formData.scaleWeight) || 0) - (Number(formData.billWeight) || 0);
+
     const handleSave = async (e?: React.FormEvent, keepSellerInfo: boolean = false) => {
         if (e) e.preventDefault();
 
@@ -271,25 +335,22 @@ const EntryPage: React.FC = () => {
                 await dataService.addInvoice({ ...formData, date: formatToISODate(currentDate) } as any, 'entry');
                 showToast('ثبت شد.');
                 if (keepSellerInfo) {
-                    setFormData({
+                    // "ثبت و افزودن محصول دیگر": keep the seller AND the selected PRODUCT (the user is
+                    // working through one product at a time), and clear only the per-row values:
+                    // bill number + the two weights.
+                    // `wastage` is deliberately NOT form state any more - it is derived from the two
+                    // weights on save - so a stale 0 can never be written into the next row (that was
+                    // the "افت is not calculated for the second product" bug).
+                    const nextForm: any = {
                         ...formData,
-                        productId: settings.products[0]?.id || '',
+                        billNumber: '',
                         billWeight: 0,
                         scaleWeight: 0,
-                        wastage: 0
-                    });
-                } else {
-                    if (keepSellerInfo) {
-                    setFormData({
-                        ...formData,
-                        productId: settings.products[0]?.id || '',
-                        billWeight: 0,
-                        scaleWeight: 0,
-                        wastage: 0
-                    });
+                    };
+                    delete nextForm.wastage;
+                    setFormData(nextForm);
                 } else {
                     setFormData({ ...initialFormState, productId: formData.productId });
-                }
                 }
                 setTimeout(() => firstInputRef.current?.focus(), 100);
             }
@@ -443,12 +504,8 @@ const EntryPage: React.FC = () => {
                                         <input
                                             type="text"
                                             value={pageSettings[index]?.title || ''}
-                                            onChange={e => {
-                                                const newSettings = [...pageSettings];
-                                                if (!newSettings[index]) newSettings[index] = { title: '', description: '' };
-                                                newSettings[index].title = e.target.value;
-                                                setPageSettings(newSettings);
-                                            }}
+                                            onChange={e => setPageTitle(index, e.target.value)}
+                                            onBlur={e => setPageTitle(index, e.target.value, true)}
                                             className="w-full p-2 border rounded-lg text-sm"
                                             placeholder="تیتر پیش‌فرض جایگزین می‌شود..."
                                         />
@@ -521,10 +578,6 @@ const EntryPage: React.FC = () => {
                             <input ref={firstInputRef} onKeyDown={handleKeyDown} placeholder="نام فروشنده" value={formData.sellerName} onChange={e => setFormData({...formData, sellerName: e.target.value})} className="w-full p-2 border rounded-lg" required />
                         </div>
                         <div>
-                            <label className="block text-xs font-bold text-slate-500 mb-1">کارخانه</label>
-                            <input onKeyDown={handleKeyDown} placeholder="نام کارخانه" value={formData.factory || ''} onChange={e => setFormData({...formData, factory: e.target.value})} className="w-full p-2 border rounded-lg" />
-                        </div>
-                        <div>
                             <label className="block text-xs font-bold text-slate-500 mb-1">شماره بارنامه</label>
                             <input onKeyDown={handleKeyDown} placeholder="شماره بارنامه" value={formData.billNumber} onChange={e => setFormData({...formData, billNumber: e.target.value})} className="w-full p-2 border rounded-lg" />
                         </div>
@@ -533,7 +586,7 @@ const EntryPage: React.FC = () => {
                             <input list="origin-list" onKeyDown={handleKeyDown} placeholder="مبدا بارگیری" value={formData.origin} onChange={e => setFormData({...formData, origin: e.target.value})} className="w-full p-2 border rounded-lg" />
                         </div>
                     </div>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 border-t pt-4">
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4 border-t pt-4">
                         <div>
                             <label className="block text-xs font-bold text-slate-500 mb-1">نوع محصول</label>
                             <select onKeyDown={handleKeyDown} value={formData.productId} onChange={e => setFormData({...formData, productId: e.target.value})} className="w-full p-2 border rounded-lg h-[42px]">
@@ -552,6 +605,15 @@ const EntryPage: React.FC = () => {
                         <div>
                             <label className="block text-xs font-bold text-slate-500 mb-1">وزن باسکول (تخلیه)</label>
                             <input onKeyDown={handleKeyDown} type="number" placeholder="وزن باسکول" value={formData.scaleWeight || ''} onChange={e => setFormData({...formData, scaleWeight: parseFloat(e.target.value) || 0})} className="w-full p-2 border rounded-lg" required />
+                        </div>
+                        {/* The deduction (افت) is DERIVED live and re-evaluated for every row, including
+                            the rows added with "ثبت و افزودن محصول دیگر" - there is no stored value that
+                            could go stale between rows. */}
+                        <div>
+                            <label className="block text-xs font-bold text-slate-500 mb-1">افت (محاسبه خودکار)</label>
+                            <div className={`w-full p-2 rounded-lg border text-center font-bold h-[42px] flex items-center justify-center ${derivedWastage < 0 ? 'bg-red-50 border-red-200 text-red-600' : 'bg-slate-50 border-slate-200 text-slate-700'}`}>
+                                {formatWastage(derivedWastage)}
+                            </div>
                         </div>
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-4 gap-4 border-t pt-4">
@@ -614,6 +676,25 @@ const EntryPage: React.FC = () => {
                 </form>
             )}
 
+            {/* Dedicated page title in the main UI, directly above the table (Task 4). */}
+            <div className="flex flex-wrap items-center gap-3 bg-white px-4 py-3 rounded-xl shadow-md border-r-4 border-sky-500 no-print">
+                <div className="flex items-center gap-2">
+                    <span className="text-[11px] text-slate-400">عنوان صفحه ۱ (اعمال بر همه صفحات):</span>
+                    <h2 className="text-lg font-bold text-slate-800">{effectiveTitle}</h2>
+                </div>
+                <div className="flex items-center gap-2 mr-auto">
+                    <input
+                        value={titleDraft}
+                        onChange={e => commitTitle(e.target.value)}
+                        onBlur={e => commitTitle(e.target.value, true)}
+                        placeholder="عنوان اختصاصی این صفحه..."
+                        className="p-2 border rounded-lg text-sm min-w-[260px]"
+                    />
+                    <span className="text-[11px] text-slate-400 whitespace-nowrap">ذخیره خودکار</span>
+                </div>
+                <span className="text-sm font-bold text-slate-500 whitespace-nowrap">{formatDateWithWeekday(currentDate)}</span>
+            </div>
+
             <div className="bg-white p-5 rounded-xl shadow-md overflow-x-auto">
                 <div className="text-xs text-slate-400 mb-2 flex items-center gap-1">
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
@@ -652,11 +733,31 @@ const EntryPage: React.FC = () => {
                     </thead>
                     <tbody ref={tableBodyRef} className={pageBreakMode ? 'page-break-selector' : ''}>
                         {filteredEntries.map((e, idx) => (
-                            <tr key={e.id} data-id={e.id} onClick={() => pageBreakMode && handleTogglePageBreak(e.id)} className={`border-b hover:bg-slate-50 transition-all ${e.isPageBreak ? 'page-break-indicator' : ''}`}>
+                            <React.Fragment key={e.id}>
+                                {pageStarts.has(idx) && (
+                                    <tr className="page-title-row no-print">
+                                        <td colSpan={15} className="p-2 bg-sky-50 border-y-2 border-sky-300">
+                                            <div className="flex items-center gap-2 flex-wrap">
+                                                <span className="font-bold text-sky-900 text-sm whitespace-nowrap">
+                                                    شروع صفحه {toPersianNumerals((pageStarts.get(idx) as number) + 1)}:
+                                                </span>
+                                                <input
+                                                    value={pageTitleValue(pageStarts.get(idx) as number)}
+                                                    onChange={ev => setPageTitle(pageStarts.get(idx) as number, ev.target.value)}
+                                                    onBlur={ev => setPageTitle(pageStarts.get(idx) as number, ev.target.value, true)}
+                                                    placeholder="عنوان اختصاصی این صفحه..."
+                                                    className="p-1.5 border rounded-lg text-sm min-w-[240px] flex-grow"
+                                                />
+                                                <span className="text-[11px] text-slate-500 whitespace-nowrap">ذخیره خودکار</span>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                )}
+                                <tr data-id={e.id} onClick={() => pageBreakMode && handleTogglePageBreak(e.id)} className={`border-b hover:bg-slate-50 transition-all ${e.isPageBreak ? 'page-break-indicator' : ''}`}>
                                 <td className="p-2 no-print">
                                     {!pageBreakMode && <input type="checkbox" checked={selectedIds.has(e.id)} onChange={() => toggleSelection(e.id)} onClick={ev => ev.stopPropagation()} />}
                                 </td>
-                                <td className={`p-2 ${(!pageBreakMode && !searchTerm) ? 'cursor-move' : ''}`}>{toPersianNumerals(idx + 1)}</td>
+                                <td className={`p-2 ${(!pageBreakMode && !searchTerm && sortConfig.length === 0 && !isViewer) ? 'cursor-move' : ''}`}>{toPersianNumerals(idx + 1)}</td>
                                 <td className="p-2">{e.sellerName}</td>
                                 <td className="p-2 font-bold text-sky-800">{productMap.get(e.productId)}</td>
                                 <td className="p-2">{toPersianNumerals(Number(e.billWeight || 0).toLocaleString())}</td>
@@ -681,6 +782,7 @@ const EntryPage: React.FC = () => {
                                     </div>
                                 </td>
                             </tr>
+                            </React.Fragment>
                         ))}
                     </tbody>
                     <tfoot className="bg-slate-100 font-bold text-slate-800 border-t-2 border-slate-600">
@@ -704,6 +806,22 @@ const EntryPage: React.FC = () => {
                     </tfoot>
                 </table>
             </div>
+
+            {productTotals.length > 0 && (
+                <div className="mt-3 mb-2 bg-white border border-slate-300 rounded-xl shadow-sm px-4 py-2 no-print">
+                    <div className="flex items-center flex-wrap gap-2 text-xs">
+                        <span className="font-bold text-slate-700">جمع محصولات روز:</span>
+                        {productTotals.map(p => (
+                            <span key={p.name} className="inline-flex items-center gap-1 bg-sky-50 border border-sky-200 text-sky-900 rounded-lg px-2 py-1">
+                                <span className="font-bold">{p.name}</span>
+                                <span className="font-mono">{toPersianNumerals(Math.round(p.total).toLocaleString())}</span>
+                                <span className="text-[10px] text-slate-500">({toPersianNumerals(p.rows)} ردیف)</span>
+                            </span>
+                        ))}
+                        <span className="mr-auto text-slate-500">تعداد اقلام: {toPersianNumerals(productTotals.length)}</span>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

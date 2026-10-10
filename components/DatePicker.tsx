@@ -6,7 +6,12 @@ import persian_fa from 'react-date-object/locales/persian_fa';
 interface DatePickerProps {
     id: string;
     placeholder?: string;
-    value: Date;
+    /**
+     * Optional: "no date chosen yet" is a REAL state (e.g. an unfinished brood has no end date).
+     * It must stay empty - passing `new Date()` as a fallback would silently store today's date as
+     * the end of the period.
+     */
+    value?: Date | null;
     onChange: (date: Date) => void;
     className?: string;
 }
@@ -23,7 +28,7 @@ const DatePicker: React.FC<DatePickerProps> = ({ id, placeholder, value, onChang
     return (
         <div className={`relative ${className || ''}`} id={id}>
             <DatePickerMulti
-                value={value}
+                value={(value ?? undefined) as any}
                 onChange={handleChange}
                 calendar={persian}
                 locale={persian_fa}

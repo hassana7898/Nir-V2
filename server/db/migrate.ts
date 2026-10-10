@@ -286,6 +286,28 @@ export async function runMigrations() {
       CREATE INDEX IF NOT EXISTS logs_type_idx ON logs(type);
     `);
 
+    // Server-authoritative audit trail (ردپای کاربران): atomic with the business change.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        username TEXT,
+        role TEXT,
+        action TEXT NOT NULL,
+        entity TEXT NOT NULL,
+        target_ids JSONB,
+        summary JSONB,
+        details TEXT,
+        ip_address TEXT,
+        user_agent TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS audit_logs_created_at_idx ON audit_logs(created_at);
+      CREATE INDEX IF NOT EXISTS audit_logs_action_idx ON audit_logs(action);
+      CREATE INDEX IF NOT EXISTS audit_logs_user_id_idx ON audit_logs(user_id);
+      CREATE INDEX IF NOT EXISTS audit_logs_entity_idx ON audit_logs(entity);
+    `);
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS sync_mutations (
         id TEXT PRIMARY KEY,
@@ -334,6 +356,52 @@ export async function runMigrations() {
     await client.query(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_secret TEXT;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS is_2fa_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+    `);
+
+    // ---- Weighbridge (باسکول توزین نگار) ------------------------------------------------
+    // Tickets imported from the factory SQL Server by the background worker, plus the link to
+    // the entry/exit invoice they were assigned to. Fully idempotent (mirrors
+    // migrations/0003_weighbridge.sql so a fresh install and an upgraded one converge).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS weighbridge_records (
+        id                    SERIAL PRIMARY KEY,
+        external_id           INTEGER NOT NULL UNIQUE,
+        ticket_number         TEXT,
+        plate_number          TEXT,
+        driver_name           TEXT,
+        carrier_company       TEXT,
+        gross_weight          NUMERIC(14, 3),
+        tare_weight           NUMERIC(14, 3),
+        net_weight            NUMERIC(14, 3),
+        weigh_time            TIMESTAMP,
+        status                TEXT NOT NULL DEFAULT 'unmapped',
+        mapped_remittance_id  TEXT REFERENCES invoices(id),
+        previous_weight_value TEXT,
+        source                TEXT DEFAULT 'WEIGHNGDB.WeightTable',
+        raw_payload           JSONB,
+        last_synced_at        TIMESTAMP,
+        created_at            TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at            TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+      ALTER TABLE weighbridge_records ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'WEIGHNGDB.WeightTable';
+      ALTER TABLE weighbridge_records ADD COLUMN IF NOT EXISTS raw_payload JSONB;
+      ALTER TABLE weighbridge_records ADD COLUMN IF NOT EXISTS last_synced_at TIMESTAMP;
+      ALTER TABLE weighbridge_records ADD COLUMN IF NOT EXISTS previous_weight_value TEXT;
+      ALTER TABLE weighbridge_records ADD COLUMN IF NOT EXISTS direction TEXT NOT NULL DEFAULT 'unknown';
+      ALTER TABLE weighbridge_records ADD COLUMN IF NOT EXISTS direction_locked BOOLEAN NOT NULL DEFAULT FALSE;
+      ALTER TABLE weighbridge_records ADD COLUMN IF NOT EXISTS goods TEXT;
+      ALTER TABLE weighbridge_records ADD COLUMN IF NOT EXISTS remittance_number TEXT;
+      ALTER TABLE weighbridge_records ADD COLUMN IF NOT EXISTS customer_name TEXT;
+      CREATE INDEX IF NOT EXISTS weighbridge_records_weigh_time_idx ON weighbridge_records(weigh_time DESC);
+      CREATE INDEX IF NOT EXISTS weighbridge_records_plate_idx      ON weighbridge_records(plate_number);
+      CREATE INDEX IF NOT EXISTS weighbridge_records_status_idx     ON weighbridge_records(status);
+      CREATE INDEX IF NOT EXISTS weighbridge_records_mapped_idx     ON weighbridge_records(mapped_remittance_id);
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'weighbridge_records_status_chk') THEN
+          ALTER TABLE weighbridge_records ADD CONSTRAINT weighbridge_records_status_chk
+            CHECK (status IN ('unmapped', 'mapped', 'archived'));
+        END IF;
+      END $$;
     `);
 
     await client.query('COMMIT');

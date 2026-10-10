@@ -61,6 +61,7 @@ export const BACKUP_ENTITIES = [
   'inventory_adjustments',
   'inventory_transactions',
   'logs',
+  'audit_logs',
 ] as const;
 
 export type BackupEntity = (typeof BACKUP_ENTITIES)[number];
@@ -81,6 +82,7 @@ const tableMap: Record<BackupEntity, any> = {
   inventory_adjustments: schema.inventory_adjustments,
   inventory_transactions: schema.inventory_transactions,
   logs: schema.logs,
+  audit_logs: schema.audit_logs,
 };
 
 export interface SnapshotPayload {

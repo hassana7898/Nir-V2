@@ -21,3 +21,16 @@ backups/
 certs/
 *.pem
 *.pfx
+
+# Scratch / session artifacts (tsc, build, probe outputs)
+tsc-*.txt
+tsc-*.err
+build-*.log
+build-*.txt
+build-*.err
+*.done
+local-server*.log
+npm-install.log
+.eslintcache
+tmp/
+scratch/

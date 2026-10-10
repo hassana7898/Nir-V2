@@ -1,5 +1,5 @@
 
-import { Settings, Entry, Exit, Log, Remittance, Product, Formula, ProductionRecord, InventoryAdjustment, Farmer, Brood } from '../types';
+import { Settings, Entry, Exit, Log, Remittance, Product, Formula, ProductionRecord, InventoryAdjustment, Farmer, Brood, WeighbridgeListResult, WeighbridgeRecord, WeighbridgeStats, WeighbridgeCandidatesResult } from '../types';
 import { formatToISODate, formatDate } from '../utils/formatters';
 
 import { ApiResponse, ApiError, ApiErrorCode } from '../shared/apiContract';
@@ -8,6 +8,8 @@ import { setCacheItem, getCacheItem, enqueueMutation, memoryCache } from './dbSt
 
 import { initDB, moveToFailedMutations, updateMutation, MAX_SYNC_RETRIES } from './dbStore';
 import { clearLocalAuth } from './authService';
+import { farmerNameKey, findClosestName, normalizePersianText, normalizePhone } from '../shared/persianText';
+import { mergeBroods, softDeleteBrood, restoreBroodInList, activeBroods, deletedBroods, isBroodDeleted } from '../shared/broodMerge';
 
 // Pure UI Preferences Storage (Non-sensitive, UI-only, e.g. sort orders, theme, view options)
 const localStorage = {
@@ -61,6 +63,9 @@ const DEFAULT_SETTINGS: Settings = {
     factoryLogo: null,
     entryPrintTitle: "فرم ورود روزانه",
     exitPrintTitle: "فرم خروج روزانه",
+    entryPageTitles: [],
+    exitPageTitles: [],
+    enabledMenus: { warehouses: true, inventoryAnalysis: true, production: true, weighbridge: true },
     entrySignatures: ["تایید کننده اول", "مسئول باسکول", "مدیر تحویل", "امضای چهارم"],
     entrySignatureNames: ["", "", "", ""],
     exitSignatures: ["راننده", "مسئول باسکول", "مدیریت / سرپرست", "امضای چهارم"],
@@ -161,13 +166,66 @@ export const sendRestRequest = async <T = any>(
         const data = await response.json().catch(() => ({}));
 
         if (response.ok) {
+            // A 2xx IS a success. Some routes (and array payloads) omit the explicit flag, and the
+            // outbox used to treat those as failures and retry an already-applied mutation forever.
+            if (data && typeof data === 'object' && !Array.isArray(data) && (data as any).success === undefined) {
+                return { ...(data as any), success: true } as ApiResponse<T>;
+            }
             return data as ApiResponse<T>;
         }
 
-        return data as ApiResponse<T>; // Should be the error structure
+        // Non-2xx: ALWAYS hand back a structured error that carries the HTTP status, even when the
+        // server replied with a plain string body (`{ error: 'Invalid sync mutation.' }`) or HTML.
+        // Without the status the outbox cannot tell a permanent rejection (400/422) from a
+        // transient outage, and mutations clog the queue as "ghost" items forever.
+        return normalizeHttpError(data, response.status) as ApiResponse<T>;
     } catch (error: any) {
         return { success: false, error: { code: 'OFFLINE', message: 'خطای شبکه' } };
     }
+};
+
+/** HTTP status -> contract error code, used when the server body carries no structured code. */
+export const httpErrorCodeForStatus = (status: number): ApiErrorCode => {
+    if (status === 401) return 'AUTH_FAILED';
+    if (status === 403) return 'FORBIDDEN';
+    if (status === 404) return 'NOT_FOUND';
+    if (status === 409) return 'CONFLICT';
+    if (status === 408) return 'TIMEOUT';
+    if (status === 429) return 'RATE_LIMITED';
+    if (status >= 400 && status < 500) return 'VALIDATION_FAILED'; // 400/422/... = the payload itself is rejected
+    return 'SERVER_ERROR';
+};
+
+/** Build a contract-shaped error out of an arbitrary (possibly unstructured) HTTP failure body. */
+const normalizeHttpError = (body: any, status: number): ApiResponse<never> => {
+    const fallbackCode = httpErrorCodeForStatus(status);
+    const fallbackMessage = `خطای سرور (HTTP ${status})`;
+
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return { success: false, error: { code: fallbackCode, message: fallbackMessage, status } };
+    }
+
+    const raw = (body as any).error;
+    if (raw && typeof raw === 'object') {
+        return {
+            success: false,
+            error: {
+                code: (raw.code || fallbackCode) as ApiErrorCode,
+                message: raw.message || fallbackMessage,
+                details: raw.details,
+                status,
+            },
+        };
+    }
+
+    return {
+        success: false,
+        error: {
+            code: fallbackCode,
+            message: (typeof raw === 'string' && raw.trim() ? raw : (body as any).message) || fallbackMessage,
+            status,
+        },
+    };
 };
 
 
@@ -209,25 +267,260 @@ export const getFarmers = (): Farmer[] => {
     return [];
 };
 
-export const saveFarmers = async (farmers: Farmer[]): Promise<void> => {
+// --- Farmer duplicate detection (reconciliation UI + "did you mean...?" prompts) --------------
+
+export interface DuplicateFarmerSuggestion {
+    farmer: Farmer;
+    name: string;
+    kind: 'exact' | 'close';
+    distance: number;
+    invoiceCount: number;
+}
+
+/** Exit invoices currently attached to this farmer id. */
+export const countExitsForFarmer = (farmerId: string): number =>
+    getAllInvoices().filter((i: any) => i.farmerId === farmerId).length;
+
+/**
+ * The closest existing farmer to a (possibly typo/variant) name, with how many invoices hang off
+ * each candidate - the reconciliation UI orders by "who owns the history".
+ */
+export const findDuplicateFarmer = (name: string, excludeId?: string, maxDistance = 2): DuplicateFarmerSuggestion | null => {
+    if (!String(name || '').trim()) return null;
+    const candidates = getFarmers().filter(f => f.id !== excludeId);
+    const suggestion = findClosestName(name, candidates, (f) => f.name, maxDistance);
+    if (!suggestion) return null;
+    return {
+        farmer: suggestion.candidate,
+        name: suggestion.name,
+        kind: suggestion.kind,
+        distance: suggestion.distance,
+        invoiceCount: countExitsForFarmer(suggestion.candidate.id),
+    };
+};
+
+/** All farmer groups that share the same normalised name (i.e. server-side duplicates). */
+export const findDuplicateFarmerGroups = (): { key: string; farmers: Farmer[] }[] => {
+    const groups = new Map<string, Farmer[]>();
+    for (const farmer of getFarmers()) {
+        if ((farmer as any).isDeleted) continue;
+        const key = farmerNameKey(farmer.name);
+        if (!key) continue;
+        const bucket = groups.get(key) || [];
+        bucket.push(farmer);
+        groups.set(key, bucket);
+    }
+    return Array.from(groups.entries())
+        .filter(([, list]) => list.length > 1)
+        .map(([key, list]) => ({ key, farmers: list }));
+};
+
+/**
+ * Exit invoices that point at a farmer the UI cannot resolve (deleted/unknown id). Those are the
+ * rows that render as «ناشناس»; the reconciliation UI lets the user re-link them.
+ */
+export interface OrphanInvoiceGroup {
+    farmerId: string;
+    invoiceIds: string[];
+    totalWeight: number;
+    lastDate: string;
+    driverNames: string[];
+}
+
+export const findOrphanInvoiceGroups = (): OrphanInvoiceGroup[] => {
+    const known = new Set(getFarmers().map(f => f.id));
+    const groups = new Map<string, OrphanInvoiceGroup>();
+    for (const invoice of getAllInvoices() as any[]) {
+        const farmerId = invoice?.farmerId;
+        if (!farmerId || known.has(farmerId)) continue;
+        const group: OrphanInvoiceGroup = groups.get(farmerId) ?? { farmerId, invoiceIds: [], totalWeight: 0, lastDate: '', driverNames: [] };
+        group.invoiceIds.push(invoice.id);
+        group.totalWeight += Number(invoice.weight || 0);
+        if (invoice.date && invoice.date > group.lastDate) group.lastDate = invoice.date;
+        const driver = String(invoice.driverName || '').trim();
+        if (driver && !group.driverNames.includes(driver)) group.driverNames.push(driver);
+        groups.set(farmerId, group);
+    }
+    return Array.from(groups.values()).sort((a, b) => b.invoiceIds.length - a.invoiceIds.length);
+};
+
+// Shape sent to the API: exactly the columns the farmers route accepts.
+// CRITICAL: `id` MUST be included. Without it the server generated a brand-new randomUUID for
+// every POST, so each save produced a second row that no invoice referenced - that is what turned
+// farmers into «ناشناس» and created duplicate rows on every edit.
+const farmerApiPayload = (f: any) => ({
+    id: f?.id ? String(f.id) : undefined,
+    name: normalizePersianText(f?.name ?? ''),
+    phone: f?.phone === undefined || f?.phone === null || String(f.phone).trim() === '' ? null : normalizePhone(f.phone),
+    broods: Array.isArray(f?.broods) ? f.broods : [],
+    isHidden: Boolean(f?.isHidden),
+});
+
+const farmerApiPayloadChanged = (a: any, b: any): boolean =>
+    JSON.stringify(farmerApiPayload(a)) !== JSON.stringify(farmerApiPayload(b));
+
+/**
+ * Persist the farmer list.
+ *
+ * 1) The local cache is written FIRST, so the UI never waits on the network (offline-first).
+ * 2) The DIFF against the previous cache is then pushed to PostgreSQL: POST for new farmers,
+ *    PUT for changed ones, DELETE for removed ones (or ones flagged `isDeleted`). Every failed
+ *    call is queued in the outbox instead, so nothing is lost while offline.
+ *
+ * WHY THIS IS A FIX: this function used to write ONLY to the local cache. `hydrateFromServer`
+ * REPLACES the farmers cache with the server rows on every load, so any change made through it
+ * (archiving a brood = setting `endDate`, deleting/adding a brood, renaming/hiding a farmer, the
+ * import modals) silently vanished on the next hydration - the "Archive does nothing" bug.
+ *
+ * @returns true only when every difference reached the server (or was queued for retry).
+ */
+export const saveFarmers = async (farmers: Farmer[]): Promise<boolean> => {
+    const previousRaw = dataStore.getItem(FARMERS_KEY);
+    const previous: Farmer[] = Array.isArray(previousRaw) ? previousRaw : [];
+
     await dataStore.setItem(FARMERS_KEY, farmers);
+
+    const previousById = new Map(previous.map(f => [f.id, f]));
+    const nextIds = new Set(farmers.map(f => f.id));
+    let allPersisted = true;
+    // localId -> serverId, filled when the server reused an existing farmer for this name.
+    const remaps = new Map<string, string>();
+
+    const queue = async (action: 'create' | 'update' | 'delete', payload: any) => {
+        await enqueueMutation({
+            id: crypto.randomUUID(),
+            action,
+            entityType: 'poultryAppFarmers',
+            payload,
+        });
+    };
+
+    for (const farmer of farmers) {
+        const prev = previousById.get(farmer.id);
+        const markedDeleted = Boolean((farmer as any).isDeleted || (farmer as any).deletedAt);
+
+        if (markedDeleted) {
+            // A farmer flagged as deleted locally becomes a server-side soft delete.
+            if (prev && !((prev as any).isDeleted || (prev as any).deletedAt)) {
+                const res = await sendRestRequest(`/api/farmers/${encodeURIComponent(farmer.id)}`, { method: 'DELETE' });
+                if (!res.success) { await queue('delete', { id: farmer.id }); allPersisted = false; }
+            }
+            continue;
+        }
+
+        if (!prev || (prev as any).isDeleted || (prev as any).deletedAt) {
+            // New - or locally revived after a delete: POST upserts and clears deletedAt.
+            const res = await sendRestRequest<any>('/api/farmers', { method: 'POST', body: JSON.stringify(farmerApiPayload(farmer)) });
+            if (!res.success) { await queue('create', farmer); allPersisted = false; }
+            else if (res.data?.reused && res.data?.id && res.data.id !== farmer.id) {
+                // The server already had this person under another id (normalised-name match):
+                // remember the remap so the local id is re-linked instead of living on as a twin.
+                remaps.set(farmer.id, res.data.id);
+            }
+            continue;
+        }
+
+        if (!farmerApiPayloadChanged(prev, farmer)) continue;
+
+        const res = await sendRestRequest(`/api/farmers/${encodeURIComponent(farmer.id)}`, {
+            method: 'PUT',
+            body: JSON.stringify(farmerApiPayload(farmer)),
+        });
+        if (!res.success) { await queue('update', farmer); allPersisted = false; }
+    }
+
+    // Farmers that disappeared from the list (merge, delete) are soft-deleted on the server too.
+    for (const prev of previous) {
+        if (nextIds.has(prev.id)) continue;
+        if ((prev as any).isDeleted || (prev as any).deletedAt) continue;
+        const res = await sendRestRequest(`/api/farmers/${encodeURIComponent(prev.id)}`, { method: 'DELETE' });
+        if (!res.success) { await queue('delete', { id: prev.id }); allPersisted = false; }
+    }
+
+    // Re-link local ids the server resolved to an existing row (duplicate prevention). Without
+    // this the local twin would keep its own id while the server row keeps another one - exactly
+    // the split identity that made invoices show «ناشناس».
+    if (remaps.size > 0) await applyFarmerIdRemaps(remaps);
+
+    return allPersisted;
+};
+
+/**
+ * Re-link every local reference from `localId` to the authoritative `serverId`.
+ * `invoices.farmerId` is remapped in the cache AND pushed to the server (adopt endpoint), so the
+ * two sides can never keep pointing at different farmer rows.
+ */
+export const applyFarmerIdRemaps = async (remaps: Map<string, string>): Promise<number> => {
+    let touchedInvoices = 0;
+
+    // Raw cache: a remap rewrites ids, so every unrelated row must stay untouched by definition.
+    const farmers = rawFarmers();
+    const nextFarmers = farmers.map(f => remaps.has(f.id) ? { ...f, id: remaps.get(f.id) as string } : f);
+    // A remap can collapse two local twins into one row: keep the first occurrence only.
+    const deduped: Farmer[] = [];
+    const seen = new Set<string>();
+    for (const farmer of nextFarmers) {
+        if (seen.has(farmer.id)) continue;
+        seen.add(farmer.id);
+        deduped.push(farmer);
+    }
+    await dataStore.setItem(FARMERS_KEY, deduped);
+
+    const invoices = getAllInvoices();
+    const adoptedIdsByFarmer = new Map<string, string[]>();
+    const nextInvoices = invoices.map((invoice: any) => {
+        const target = invoice?.farmerId ? remaps.get(invoice.farmerId) : undefined;
+        if (!target) return invoice;
+        touchedInvoices += 1;
+        const list = adoptedIdsByFarmer.get(target) || [];
+        list.push(invoice.id);
+        adoptedIdsByFarmer.set(target, list);
+        return { ...invoice, farmerId: target };
+    });
+    if (touchedInvoices > 0) {
+        await dataStore.setItem(INVOICES_KEY, nextInvoices);
+        invalidateInventoryCache();
+    }
+
+    // Best effort server-side re-link: the ids are now unambiguous, so a failure only means the
+    // next sync/hydration will re-attempt it (the local cache is already consistent).
+    for (const [targetId, invoiceIds] of adoptedIdsByFarmer) {
+        await adoptInvoicesToFarmer(targetId, invoiceIds).catch(() => 0);
+    }
+
+    return touchedInvoices;
 };
 
 export const addFarmer = async (farmerData: Partial<Farmer>): Promise<Farmer> => {
-    const farmers = getFarmers();
+    const farmers = rawFarmers();
     const newFarmer: Farmer = {
         id: farmerData.id || `f_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-        name: farmerData.name?.trim() || 'مرغدار جدید',
+        // Sanitised on the way in: Arabic ي/ك and stray spaces must never create a second identity.
+        name: normalizePersianText(farmerData.name) || 'مرغدار جدید',
         broods: farmerData.broods || [],
         isHidden: Boolean(farmerData.isHidden),
     };
+    if (farmerData.phone !== undefined && String(farmerData.phone).trim() !== '') {
+        newFarmer.phone = normalizePhone(farmerData.phone);
+    }
+    // Never create a local twin: if a farmer with the same normalised name already exists here,
+    // reuse that row (the server applies the same rule).
+    const localTwin = farmers.find(f => f.id !== newFarmer.id && farmerNameKey(f.name) === farmerNameKey(newFarmer.name));
+    if (localTwin) {
+        localTwin.broods = mergeBroodLists(localTwin.broods, newFarmer.broods);
+        localTwin.phone = localTwin.phone || newFarmer.phone;
+        await dataStore.setItem(FARMERS_KEY, farmers);
+        return localTwin;
+    }
+
     farmers.push(newFarmer);
     await dataStore.setItem(FARMERS_KEY, farmers);
 
     // Primary path when ONLINE: REST API -> Node/Express -> Drizzle -> PostgreSQL
-    const apiRes = await sendRestRequest('/api/farmers', {
+    const apiRes = await sendRestRequest<any>('/api/farmers', {
         method: 'POST',
-        body: JSON.stringify(newFarmer),
+        headers: { 'X-Operation-Id': crypto.randomUUID() },
+        body: JSON.stringify(farmerApiPayload(newFarmer)),
     });
 
     if (!apiRes.success) {
@@ -237,22 +530,39 @@ export const addFarmer = async (farmerData: Partial<Farmer>): Promise<Farmer> =>
             entityType: 'poultryAppFarmers',
             payload: newFarmer,
         });
+        return newFarmer;
+    }
+
+    // The server may have folded this into an existing row (same normalised name): re-link local
+    // references so invoices never end up attached to a farmer id the server does not have.
+    const serverId = apiRes.data?.id ? String(apiRes.data.id) : null;
+    if (serverId && apiRes.data?.reused && serverId !== newFarmer.id) {
+        await applyFarmerIdRemaps(new Map([[newFarmer.id, serverId]]));
+        const adopted = getFarmers().find(f => f.id === serverId);
+        if (adopted) return adopted;
     }
     return newFarmer;
 };
 
 export const updateFarmer = async (id: string, updates: Partial<Farmer>): Promise<void> => {
-    const farmers = getFarmers();
+    // Raw cache again: this function WRITES back what it read.
+    const farmers = rawFarmers();
     const index = farmers.findIndex(f => f.id === id);
     if (index > -1) {
-        const updated = { ...farmers[index], ...updates };
+        // Sanitise before persisting (same rule as create): a rename must not fork the identity.
+        const sanitized: Partial<Farmer> = { ...updates };
+        if (updates.name !== undefined) sanitized.name = normalizePersianText(updates.name);
+        if (updates.phone !== undefined) {
+            sanitized.phone = String(updates.phone).trim() === '' ? undefined : normalizePhone(updates.phone);
+        }
+        const updated = { ...farmers[index], ...sanitized };
         farmers[index] = updated;
         await dataStore.setItem(FARMERS_KEY, farmers);
 
         // Primary path when ONLINE: REST API -> Node/Express -> Drizzle -> PostgreSQL
         const apiRes = await sendRestRequest(`/api/farmers/${encodeURIComponent(id)}`, {
             method: 'PUT',
-            body: JSON.stringify(updates),
+            body: JSON.stringify(sanitized),
         });
 
         if (!apiRes.success) {
@@ -267,7 +577,8 @@ export const updateFarmer = async (id: string, updates: Partial<Farmer>): Promis
 };
 
 export const deleteFarmer = async (id: string): Promise<void> => {
-    const farmers = getFarmers();
+    // Raw cache: filtering the UI list here would drop other soft-deleted farmers as a side effect.
+    const farmers = rawFarmers();
     const filtered = farmers.filter(f => f.id !== id);
     await dataStore.setItem(FARMERS_KEY, filtered);
 
@@ -284,6 +595,77 @@ export const deleteFarmer = async (id: string): Promise<void> => {
             payload: { id },
         });
     }
+};
+
+/**
+ * The RAW farmers cache (including soft-deleted rows).
+ *
+ * `getFarmers()` filters/sorts for the UI - it must NEVER be used as the base of a write, because
+ * writing it back would silently drop every soft-deleted farmer from IndexedDB (addFarmer,
+ * updateFarmer and deleteFarmer all used to do exactly that).
+ */
+const rawFarmers = (): Farmer[] => {
+    const raw = dataStore.getItem(FARMERS_KEY);
+    return Array.isArray(raw) ? raw : [];
+};
+
+// --- Broods (periods): SOFT delete, restore, and active filtering -------------------------------
+
+/**
+ * Local reconcile of one period's soft-delete flag (the server is authoritative and already
+ * changed; this only mirrors it so the UI updates instantly without waiting for hydration).
+ */
+const applyBroodFlagLocally = async (farmerId: string, broodId: string, mode: 'delete' | 'restore', deletedAt?: string | null) => {
+    // rawFarmers(): this mirrors a server change, so it must keep every other row byte-identical
+    // (including soft-deleted farmers).
+    const farmers = rawFarmers();
+    let touched = false;
+    const next = farmers.map(farmer => {
+        if (farmer.id !== farmerId) return farmer;
+        touched = true;
+        return {
+            ...farmer,
+            broods: mode === 'delete'
+                ? softDeleteBrood<Brood>(farmer.broods, broodId, deletedAt || new Date().toISOString())
+                : restoreBroodInList<Brood>(farmer.broods, broodId),
+        };
+    });
+    if (!touched) return;
+    await dataStore.setItem(FARMERS_KEY, next);
+};
+
+/**
+ * SOFT-delete one period. The row keeps the object with a `deletedAt` flag - nothing is lost, and
+ * the recycle bin can restore it.
+ *
+ * Deliberately SERVER-FIRST: a destructive change must not be applied locally when the server did
+ * not accept it, otherwise the two sides would disagree about whether the period exists.
+ */
+export const deleteBrood = async (farmerId: string, broodId: string): Promise<string> => {
+    const res = await sendRestRequest<any>(
+        `/api/farmers/${encodeURIComponent(farmerId)}/broods/${encodeURIComponent(broodId)}`,
+        { method: 'DELETE', headers: { 'X-Operation-Id': crypto.randomUUID() } },
+    );
+    if (!res.success) {
+        throw new Error(res.error?.message || 'حذف دوره ناموفق بود. اتصال سرور را بررسی کنید.');
+    }
+    const deletedAt = res.data?.deletedAt ? String(res.data.deletedAt) : new Date().toISOString();
+    await applyBroodFlagLocally(farmerId, broodId, 'delete', deletedAt);
+    await logAction('updated', 'farmer', { id: farmerId, name: '' }).catch(() => {});
+    return deletedAt;
+};
+
+/** Restore a soft-deleted period (clears its `deletedAt` flag on the server, then locally). */
+export const restoreBrood = async (farmerId: string, broodId: string): Promise<void> => {
+    const res = await sendRestRequest<any>(
+        `/api/farmers/${encodeURIComponent(farmerId)}/broods/${encodeURIComponent(broodId)}/restore`,
+        { method: 'PUT', headers: { 'X-Operation-Id': crypto.randomUUID() } },
+    );
+    if (!res.success) {
+        throw new Error(res.error?.message || 'بازیابی دوره ناموفق بود. اتصال سرور را بررسی کنید.');
+    }
+    await applyBroodFlagLocally(farmerId, broodId, 'restore');
+    await logAction('updated', 'farmer', { id: farmerId, name: '' }).catch(() => {});
 };
 
 // --- Drivers ---
@@ -361,7 +743,8 @@ const saveAllInvoices = async (invoices: Remittance[]): Promise<void> => {
 // Resolve a numeric millisecond timestamp for any invoice:
 //  1) numeric `createdAt` (server rows via coerceMs),
 //  2) parseable `createdAt` string/date,
-//  3) the millisecond stamp embedded in locally-generated ids (`inv_<ms>_<rand>`),
+//  3) the millisecond stamp embedded in generated ids (`inv_<ms>_<rand>` and the legacy
+//     `local_<ms>_<rand>` shape written by the pre-V2 importer),
 //  4) 0 as a last resort so the comparator never yields NaN.
 export const createdMs = (inv: any): number => {
     const c = inv?.createdAt;
@@ -370,7 +753,9 @@ export const createdMs = (inv: any): number => {
         const parsed = typeof c === 'string' ? Date.parse(c) : new Date(c).getTime();
         if (Number.isFinite(parsed)) return parsed;
     }
-    const m = /^inv_(\d{10,})_/.exec(String(inv?.id ?? ''));
+    // Both id shapes embed epoch-ms as the first 13-digit group. Ignoring `local_` ids made
+    // them resolve to 0 and jump to the TOP of a chronological list.
+    const m = /^(?:inv|local)_(\d{10,})_/.exec(String(inv?.id ?? ''));
     if (m) return Number(m[1]);
     return 0;
 };
@@ -379,6 +764,13 @@ export const createdMs = (inv: any): number => {
 // so it is safe to apply to shared/cached arrays without mutating them in place.
 export const sortNewestFirst = <T extends Remittance>(list: T[]): T[] =>
     [...list].sort((a, b) => (createdMs(b) - createdMs(a)) || String(b.id).localeCompare(String(a.id)));
+
+// Chronological order (oldest -> newest) with a deterministic id tiebreaker.
+// This is the DISPLAY DEFAULT: a freshly added invoice belongs at the BOTTOM of its day, in the
+// natural order the invoices were physically issued. (The previous default was newest-first,
+// which made every new invoice jump to row 1 - reversed by the user's request on 2026-09-16.)
+export const sortChronological = <T extends Remittance>(list: T[]): T[] =>
+    [...list].sort((a, b) => (createdMs(a) - createdMs(b)) || String(a.id).localeCompare(String(b.id)));
 
 // Read the authoritative per-day manual position of an invoice as delivered by the server.
 // The DB column is `sort_order` (integer, 0-based, per type+date); the API serializes it as
@@ -401,8 +793,55 @@ const orderIdsFromServer = <T extends Remittance>(filtered: T[]): string[] | nul
         return d !== 0 ? d : String(a.id).localeCompare(String(b.id));
     });
     const listed = new Set(ordered.map(inv => inv.id));
-    const remainder = sortNewestFirst(filtered.filter(inv => !listed.has(inv.id)));
+    const remainder = sortChronological(filtered.filter(inv => !listed.has(inv.id)));
     return [...ordered.map(inv => inv.id), ...remainder.map(inv => inv.id)];
+};
+
+// --- Server-authoritative manual order (device-sync fix) --------------------------------
+// `sort_order` is the Source of Truth: every hydration rebuilds the per-day localStorage
+// layout from the server ordinals, so a device holding a stale layout can no longer disagree
+// with the device that last dragged those rows. Rows WITHOUT an ordinal (brand-new invoices)
+// stay at the BOTTOM in chronological order, exactly like the saved-layout remainder.
+export const ORDER_SYNCED_EVENT = 'nir:order_synced';
+
+// Buckets this device saved very recently: a hydration that lands while the PUT is still in
+// flight must not clobber the layout the user just committed on this very device.
+const recentLocalOrderWrites: Record<string, number> = {};
+const ORDER_WRITE_GRACE_MS = 15000;
+
+const applyServerOrderToLocalPreferences = (invoices: Remittance[]): number => {
+    const buckets = new Map<string, Remittance[]>();
+    invoices.forEach(inv => {
+        if (!inv || !inv.id || !inv.date) return;
+        const bucket = `${('sellerName' in inv) ? 'entry' : 'exit'}_${inv.date}`;
+        const rows = buckets.get(bucket);
+        if (rows) rows.push(inv); else buckets.set(bucket, [inv]);
+    });
+
+    const now = Date.now();
+    let changed = 0;
+
+    buckets.forEach((rows, bucket) => {
+        const withOrdinal = rows.filter(inv => serverOrdinal(inv) !== null);
+        if (withOrdinal.length === 0) return;                                            // nothing authoritative to apply
+        if (now - (recentLocalOrderWrites[bucket] || 0) < ORDER_WRITE_GRACE_MS) return;  // our own save is still in flight
+
+        const ordered = [...withOrdinal].sort((a, b) => {
+            const d = (serverOrdinal(a) as number) - (serverOrdinal(b) as number);
+            return d !== 0 ? d : String(a.id).localeCompare(String(b.id));
+        });
+        const listed = new Set(ordered.map(inv => inv.id));
+        const remainder = sortChronological(rows.filter(inv => !listed.has(inv.id)));
+        const next = JSON.stringify([...ordered.map(inv => inv.id), ...remainder.map(inv => inv.id)]);
+
+        const key = `sortOrder_${bucket}`;
+        if (localStorage.getItem(key) !== next) {
+            localStorage.setItem(key, next);
+            changed += 1;
+        }
+    });
+
+    return changed;
 };
 
 export const getInvoicesByDate = <T extends Remittance>(type: 'entry' | 'exit', date: Date): T[] => {
@@ -431,7 +870,7 @@ export const getInvoicesByDate = <T extends Remittance>(type: 'entry' | 'exit', 
                 });
                 // Keep the saved manual order for listed ids, but order the remaining (unlisted)
                 // invoices newest-first instead of leaving them in raw cache order.
-                return [...sortedInvoices, ...sortNewestFirst(Array.from(invoiceMap.values()) as T[])];
+                return [...sortedInvoices, ...sortChronological(Array.from(invoiceMap.values()) as T[])];
             }
             // Treat an empty saved array the same as a missing key, so the durable fallback
             // below can repopulate it.
@@ -455,10 +894,11 @@ export const getInvoicesByDate = <T extends Remittance>(type: 'entry' | 'exit', 
         return serverOrderIds.map(id => byId.get(id)).filter((inv): inv is T => inv !== undefined);
     }
 
-    // Newest-first (most recent first), with a deterministic id tiebreaker. This is the
-    // failsafe order: it no longer depends on `createdAt` being present, so locally created
-    // / offline / not-yet-hydrated rows sort correctly instead of degrading to id-only order.
-    return sortNewestFirst(filtered);
+    // Chronological (oldest first) with a deterministic id tiebreaker. This is the failsafe
+    // order: it never depends on `createdAt` being present, so locally created / offline /
+    // not-yet-hydrated rows sort correctly instead of degrading to id-only order - and a new
+    // invoice lands at the BOTTOM of its day.
+    return sortChronological(filtered);
 };
 
 
@@ -474,9 +914,10 @@ export const addInvoice = async (invoiceData: any, type: 'entry' | 'exit'): Prom
         if (_farmer && _farmer.name) newInvoice.farmerName = _farmer.name;
     }
     if (type === 'entry') {
-        if (newInvoice.wastage === undefined) { 
-             newInvoice.wastage = safeParseFloat(newInvoice.scaleWeight) - safeParseFloat(newInvoice.billWeight);
-        }
+        // The افت (deduction) is ALWAYS derived from the two weights - a client-side value is never
+        // trusted. Regression: "ثبت و افزودن محصول دیگر" used to leave `wastage: 0` in the form
+        // state, so the second row was persisted with a zero deduction.
+        newInvoice.wastage = safeParseFloat(newInvoice.scaleWeight) - safeParseFloat(newInvoice.billWeight);
     }
     
     const apiRes = await sendRestRequest('/api/invoices', {
@@ -502,16 +943,18 @@ export const addInvoice = async (invoiceData: any, type: 'entry' | 'exit'): Prom
         }
     }
 
-    const allInvoices = getAllInvoices();
+    // Copy before mutating: getAllInvoices() hands out the LIVE cache array, so pushing into it
+    // would mutate shared state (and could diverge from IndexedDB if the persist step fails).
+    const allInvoices = [...getAllInvoices()];
     allInvoices.push(newInvoice);
     await saveAllInvoices(allInvoices);
     
     try {
         const key = `sortOrder_${type}_${newInvoice.date}`;
         const currentOrder = JSON.parse(localStorage.getItem(key) || '[]');
-        // Prepend so a newly added invoice appears at the TOP of the day's list (newest-first),
-        // instead of being appended to the bottom.
-        localStorage.setItem(key, JSON.stringify([id, ...currentOrder.filter((x: string) => x !== id)]));
+        // APPEND so a newly added invoice lands at the BOTTOM of the day's list, matching the
+        // natural chronological flow (the day reads oldest -> newest, top -> bottom).
+        localStorage.setItem(key, JSON.stringify([...currentOrder.filter((x: string) => x !== id), id]));
     } catch (e) {}
     
     if (newInvoice.driverName?.trim()) await addDriver(newInvoice.driverName).catch(() => {});
@@ -521,7 +964,8 @@ export const addInvoice = async (invoiceData: any, type: 'entry' | 'exit'): Prom
 };
 
 export const updateInvoice = async (id: string, updates: any): Promise<void> => {
-    const allInvoices = getAllInvoices();
+    // Copy before mutating (same reason as addInvoice): the cache array is shared, not a value.
+    const allInvoices = [...getAllInvoices()];
     const index = allInvoices.findIndex(inv => inv.id === id);
     if (index === -1) return;
     
@@ -531,7 +975,8 @@ export const updateInvoice = async (id: string, updates: any): Promise<void> => 
     const updated = { ...original, ...updates };
     const type = 'sellerName' in updated ? 'entry' : 'exit';
     
-    if ('scaleWeight' in updated && 'billWeight' in updated && updates.wastage === undefined) {
+    if ('scaleWeight' in updated && 'billWeight' in updated) {
+        // Same rule as create: the entry deduction is derived, never taken from the caller.
         updated.wastage = safeParseFloat(updated.scaleWeight) - safeParseFloat(updated.billWeight);
     }
     
@@ -670,8 +1115,54 @@ export const bulkMoveInvoicesByIds = async (type: 'entry' | 'exit', ids: string[
     return ids.length;
 };
 
+// Push the manual per-day order to the server so it survives a cache clear and reaches other
+// devices. Deliberately non-blocking: localStorage stays the source of truth for the rendered
+// order, so a failure here (offline, expired session, VIEWER role) only logs and never disturbs
+// the UI. The server derives the ordinals from this exact id sequence, so the two cannot drift.
+export const syncOrderToServer = async (
+    type: 'entry' | 'exit',
+    date: Date,
+    orderedIds: string[]
+): Promise<boolean> => {
+    const payload = { type, date: formatToISODate(date), orderedIds };
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) return false;
+        const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        if (controller) timer = setTimeout(() => controller.abort(), 10000);
+        const res = await sendRestRequest<any>('/api/invoices/order', {
+            method: 'PUT',
+            headers: { 'X-Operation-Id': uuidv4() },
+            body: JSON.stringify(payload),
+            ...(controller ? { signal: controller.signal } : {}),
+        });
+        if (!res.success) {
+            // Expected for a VIEWER (403) or an expired session (401) - not an error the user
+            // must see, because the local layout was already applied.
+            console.warn('[NIR] server order sync skipped:', res.error?.code || 'UNKNOWN');
+            return false;
+        }
+        return true;
+    } catch (error: any) {
+        console.warn('[NIR] server order sync failed (local order kept):', error?.message || error);
+        return false;
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+};
+
 export const saveOrderForDate = async (type: 'entry' | 'exit', date: Date, orderedIds: string[]): Promise<void> => {
-    localStorage.setItem(`sortOrder_${type}_${formatToISODate(date)}`, JSON.stringify(orderedIds));
+    const bucket = `${type}_${formatToISODate(date)}`;
+    // 1) Local write first, synchronously: the visible order must never wait on the network.
+    localStorage.setItem(`sortOrder_${bucket}`, JSON.stringify(orderedIds));
+    // 2) Mark the bucket so a hydration landing while the PUT is still in flight cannot clobber
+    //    the layout the user just committed here.
+    recentLocalOrderWrites[bucket] = Date.now();
+    // 2) Durable background write. Fire-and-forget on purpose: the caller awaits this function
+    //    before showing its "layout saved" toast, so awaiting the round-trip here would put the
+    //    network (or a 10s timeout) in front of the user's click. The promise is intentionally
+    //    not awaited - syncOrderToServer never rejects and only logs.
+    void syncOrderToServer(type, date, orderedIds);
 };
 
 export const getInvoicesByDateRange = (start: string, end: string) => getAllInvoices().filter(i => i.date >= start && i.date <= end);
@@ -886,6 +1377,120 @@ export const addInventoryAdjustment = async (a: any): Promise<InventoryAdjustmen
         });
     }
     return newAdj;
+};
+
+// --- Audit trail (server-authoritative, ADMIN/MANAGER only) --------------------------------
+// Reads rows written by the backend inside the same transaction as each invoice change, so the
+// trail cannot be edited or omitted by a browser.
+export interface AuditChange { field: string; label: string; from: any; to: any; }
+
+export interface AuditLogRow {
+    id: string;
+    userId?: string | null;
+    username?: string | null;
+    role?: string | null;
+    action: string;
+    entity: string;
+    targetIds?: string[] | null;
+    summary?: { changes?: AuditChange[]; context?: any } | null;
+    details?: string | null;
+    ipAddress?: string | null;
+    userAgent?: string | null;
+    createdAt: string | number;
+}
+
+export interface AuditQuery {
+    page?: number;
+    limit?: number;
+    action?: string;
+    entity?: string;
+    user?: string;
+    from?: string;
+    to?: string;
+    search?: string;
+}
+
+export const fetchAuditLogs = async (
+    query: AuditQuery = {}
+): Promise<{ logs: AuditLogRow[]; total: number; page: number; limit: number; totalPages: number } | null> => {
+    const qs = new URLSearchParams();
+    Object.entries(query).forEach(([key, value]) => {
+        if (value === undefined || value === null || String(value).trim() === '') return;
+        qs.set(key, String(value));
+    });
+
+    const res = await sendRestRequest<any>(`/api/audit?${qs.toString()}`);
+    if (!res.success) {
+        // Expected for a VIEWER (403) or an expired session (401): the caller shows a notice.
+        console.warn('[NIR] audit fetch skipped:', res.error?.code || res.error?.message || 'UNKNOWN');
+        return null;
+    }
+    return res.data;
+};
+
+// --- Reporting dashboard (server-aggregated, ADMIN/MANAGER/ACCOUNTING) ----------------------
+// Purely additive: the values come from GET /api/reports/summary (SUM/GROUP BY in PostgreSQL).
+export interface ReportSummaryRow {
+    productId: string;
+    productName: string;
+    type: string;
+    rows: number;
+    totalWeight: number;
+    billWeight: number;
+    wastage: number;
+    transportCost: number;
+}
+export interface ReportVariantRow { type: string; variant: string; rows: number; totalWeight: number; }
+export interface ReportDayRow { date: string; type: string; rows: number; totalWeight: number; }
+// Drivers / logistics (entry + exit invoices): per-driver service, weight and freight breakdown.
+export interface ReportDriverRow {
+    driver: string;
+    entryServices: number;
+    exitServices: number;
+    totalServices: number;
+    entryWeight: number;
+    exitWeight: number;
+    totalWeight: number;
+    entryCost: number;
+    exitCost: number;
+    totalCost: number;
+    lastDate: string;
+}
+export interface ReportSummary {
+    startDate: string;
+    endDate: string;
+    generatedAt: string;
+    totals: {
+        entryWeight: number; exitWeight: number; entryRows: number; exitRows: number;
+        billWeight: number; wastage: number; transportCost: number; netWeight: number; rows: number;
+    };
+    byProduct: ReportSummaryRow[];
+    byVariant: ReportVariantRow[];
+    byDay: ReportDayRow[];
+    byDriver: ReportDriverRow[];
+    driverTotals: {
+        drivers: number;
+        entryServices: number;
+        exitServices: number;
+        totalServices: number;
+        entryWeight: number;
+        exitWeight: number;
+        totalWeight: number;
+        entryCost: number;
+        exitCost: number;
+        totalCost: number;
+    };
+}
+
+export const fetchReportSummary = async (startDate: string, endDate: string): Promise<ReportSummary | null> => {
+    const qs = new URLSearchParams({ startDate, endDate });
+    const res = await sendRestRequest<ReportSummary>(`/api/reports/summary?${qs.toString()}`, { method: 'GET' });
+    if (!res.success) {
+        // 403 for a VIEWER, 401 for an expired session: the dashboard shows a notice instead.
+        console.warn('[NIR] report summary skipped:', res.error?.code || res.error?.message || 'UNKNOWN');
+        return null;
+    }
+    return res.data as ReportSummary;
 };
 
 export const getLogs = (): Log[] => {
@@ -1288,45 +1893,102 @@ export const renameDriver = async (oldName: string, newName: string): Promise<nu
 };
 
 export const renameFarmer = async (id: string, newName: string): Promise<void> => {
+    const cleanName = normalizePersianText(newName);
+    if (!cleanName) throw new Error('نام مرغدار نمی‌تواند خالی باشد.');
     const fs = getFarmers();
-    const updated = fs.map((f: any) => f.id === id ? { ...f, name: newName } : f);
+    const updated = fs.map((f: any) => f.id === id ? { ...f, name: cleanName } : f);
+    // saveFarmers now persists the change itself (and queues it only when the API call fails),
+    // so the extra enqueueMutation that used to live here would double-write on the next sync.
     await saveFarmers(updated);
-    const target = updated.find(f => f.id === id);
-    if (target) {
-        await enqueueMutation({
-            id: crypto.randomUUID(),
-            action: 'update',
-            entityType: 'poultryAppFarmers',
-            payload: target,
-        });
-    }
 };
 
 export const mergeFarmers = async (sourceId: string, targetId: string): Promise<{ invoiceCount: number }> => {
-    const invs = getAllInvoices();
-    let count = 0;
-    const updatedInvs = invs.map(i => {
-        return i;
+    if (!sourceId || !targetId) throw new Error('انتخاب مرغدار مبدا و مقصد الزامی است.');
+    if (sourceId === targetId) throw new Error('مرغدار مبدا و مقصد نمی‌توانند یکسان باشند.');
+
+    const res = await sendRestRequest<any>('/api/farmers/merge', {
+        method: 'POST',
+        headers: { 'X-Operation-Id': crypto.randomUUID() },
+        body: JSON.stringify({ sourceId, targetId }),
     });
-    await saveAllInvoices(updatedInvs);
+
+    if (!res.success) {
+        // Merging is a server-authoritative cascade (one SQL transaction). Applying it locally
+        // while offline would leave the two sides disagreeing about who owns the invoices, so it
+        // is refused with a clear message instead of half-applied.
+        throw new Error(res.error?.message || 'ادغام مرغدار ناموفق بود. اتصال سرور را بررسی کنید.');
+    }
+
+    const movedInvoices = Number(res.data?.movedInvoices || 0);
+
+    // Local reconcile: the source farmer and its references are re-pointed to the target, so the
+    // UI is correct immediately (and hydration confirms the server state right after).
     const fs = getFarmers();
     const sourceFarmer = fs.find(f => f.id === sourceId);
     const targetFarmer = fs.find(f => f.id === targetId);
+
+    await applyFarmerIdRemaps(new Map([[sourceId, targetId]]));
+
     if (sourceFarmer && targetFarmer) {
-        targetFarmer.broods = [...(targetFarmer.broods || []), ...(sourceFarmer.broods || [])];
-        (targetFarmer as any).updatedAt = Date.now();
+        // rawFarmers() as the write base: using the filtered UI list here would drop every
+        // soft-deleted farmer row from IndexedDB.
+        const merged = rawFarmers().map(f => f.id === targetId
+            ? { ...f, broods: mergeBroodLists(f.broods, sourceFarmer.broods), phone: f.phone || sourceFarmer.phone, updatedAt: Date.now() }
+            : f);
+        await dataStore.setItem(FARMERS_KEY, merged.filter(f => f.id !== sourceId && f.id !== sourceFarmer.id));
     }
-    await saveFarmers(fs.filter(f => f.id !== sourceId));
-    await deleteFarmer(sourceId);
-    if (targetFarmer) {
-        await enqueueMutation({
-            id: crypto.randomUUID(),
-            action: 'update',
-            entityType: 'poultryAppFarmers',
-            payload: targetFarmer,
-        });
+
+    logAction('updated', 'farmer', { id: targetId, name: targetFarmer?.name || targetId }).catch(() => {});
+    await hydrateFromServer().catch(() => false);
+
+    return { invoiceCount: movedInvoices };
+};
+
+/** Brood (period) union used by the local reconcile: the SAME deep de-duplication as the server. */
+const mergeBroodLists = (base: Brood[] | undefined, extra: Brood[] | undefined): Brood[] =>
+    mergeBroods(base as any, extra as any) as unknown as Brood[];
+
+/**
+ * Re-link a set of invoices to a farmer (adoption).
+ * Updates the local cache first (so the «ناشناس» label disappears immediately) and then the
+ * server in one transaction. Returns how many rows actually changed.
+ */
+export const reassignInvoicesToFarmer = async (targetId: string, invoiceIds: string[]): Promise<number> => {
+    const target = String(targetId || '');
+    const ids = new Set((invoiceIds || []).filter(Boolean));
+    if (!target || ids.size === 0) return 0;
+
+    const invoices = getAllInvoices();
+    let localChanged = 0;
+    const nextInvoices = invoices.map((invoice: any) => {
+        if (!ids.has(invoice.id) || invoice.farmerId === target) return invoice;
+        localChanged += 1;
+        return { ...invoice, farmerId: target };
+    });
+    if (localChanged > 0) {
+        await dataStore.setItem(INVOICES_KEY, nextInvoices);
+        invalidateInventoryCache();
     }
-    return { invoiceCount: count };
+
+    const serverMoved = await adoptInvoicesToFarmer(target, Array.from(ids)).catch(() => 0);
+    return Math.max(localChanged, serverMoved);
+};
+
+/**
+ * Attach orphaned exit invoices (rows whose farmer was deleted by the old buggy merge) to a
+ * farmer. Returns how many rows the server re-linked.
+ */
+export const adoptInvoicesToFarmer = async (targetId: string, invoiceIds: string[]): Promise<number> => {
+    const ids = Array.from(new Set((invoiceIds || []).filter(Boolean)));
+    if (!targetId || ids.length === 0) return 0;
+
+    const res = await sendRestRequest<any>(`/api/farmers/${encodeURIComponent(targetId)}/adopt-invoices`, {
+        method: 'POST',
+        headers: { 'X-Operation-Id': crypto.randomUUID() },
+        body: JSON.stringify({ invoiceIds: ids }),
+    });
+    if (!res.success) return 0;
+    return Number(res.data?.movedInvoices || 0);
 };
 
 export const mergeProducts = async (sourceId: string, targetId: string): Promise<void> => {
@@ -1606,7 +2268,13 @@ export const hydrateFromServer = async (): Promise<boolean> => {
                     await write(SETTINGS_KEY, { ...DEFAULT_SETTINGS, ...s.settings });
                 }
                 if (Array.isArray(s.invoices)) {
-                    await write(INVOICES_KEY, s.invoices.map(mapServerInvoice));
+                    const serverInvoices = s.invoices.map(mapServerInvoice);
+                    await write(INVOICES_KEY, serverInvoices);
+                    // Server ordinals are authoritative: rebuild the per-day layouts from them so
+                    // every device renders the same order for the same day.
+                    if (applyServerOrderToLocalPreferences(serverInvoices) > 0) {
+                        if (typeof window !== 'undefined') window.dispatchEvent(new Event(ORDER_SYNCED_EVENT));
+                    }
                 }
                 if (Array.isArray(s.farmers)) {
                     await write(FARMERS_KEY, s.farmers.map((f: any) => ({
@@ -1651,7 +2319,11 @@ export const hydrateFromServer = async (): Promise<boolean> => {
         const candidates = [apiRes?.data, apiRes?.invoices, apiRes?.data?.data, Array.isArray(apiRes) ? apiRes : null];
         const invoices = candidates.find((c) => Array.isArray(c));
         if (Array.isArray(invoices)) {
-            await saveAllInvoices(invoices.map(mapServerInvoice));
+            const serverInvoices = invoices.map(mapServerInvoice);
+            await saveAllInvoices(serverInvoices);
+            if (applyServerOrderToLocalPreferences(serverInvoices) > 0) {
+                if (typeof window !== 'undefined') window.dispatchEvent(new Event(ORDER_SYNCED_EVENT));
+            }
             invalidateInventoryCache();
             return true;
         }
@@ -1663,17 +2335,64 @@ export const hydrateFromServer = async (): Promise<boolean> => {
 };
 
 /**
+ * How the outbox must react to one failed mutation.
+ *
+ *  - applied   : already applied by the server (idempotency key reuse) -> drop it
+ *  - defer     : connectivity / session / throttling problem -> keep it, do NOT burn retries
+ *  - permanent : the payload itself is rejected (validation 400/422, conflict, unknown
+ *                reference, forbidden) -> dead-letter at once, because retrying cannot ever
+ *                make it valid. This is what stops "ghost" items filling the queue.
+ *  - retry     : transient server-side problem -> retry until MAX_SYNC_RETRIES
+ */
+export type SyncFailureDisposition = 'applied' | 'defer' | 'permanent' | 'retry';
+
+/** Error codes that can never be fixed by retrying the exact same payload. */
+export const PERMANENT_SYNC_CODES: string[] = [
+    'VALIDATION_FAILED',
+    'CONFLICT',
+    'INSUFFICIENT_STOCK',
+    'UNKNOWN_FARMER',
+    'UNKNOWN_PRODUCT',
+    'NOT_FOUND',
+    'FORBIDDEN',
+    'IDEMPOTENCY_KEY_REUSE',
+];
+
+/** Error codes that mean "try again later" and must never consume the retry budget. */
+export const DEFERRED_SYNC_CODES: string[] = ['OFFLINE', 'NETWORK', 'TIMEOUT', 'RATE_LIMITED', 'AUTH_FAILED'];
+
+/**
+ * Classify a failed mutation. Pure and dependency-free so it can be unit-tested, and the HTTP
+ * status is authoritative: ANY 4xx (except 401/408/429) is a permanent rejection even when the
+ * server replied with an unstructured body and therefore no usable `code`.
+ */
+export const classifySyncError = (error?: { code?: string; status?: number; message?: string } | null): SyncFailureDisposition => {
+    const code = String(error?.code ?? '');
+    const status = typeof error?.status === 'number' ? error.status : undefined;
+
+    // Session/permission problems must not destroy user data: an expired session (401) is
+    // deferred, a role problem (403) is permanent but stays reviewable in the dead-letter store.
+    if (code === 'AUTH_FAILED' || status === 401) return 'defer';
+    if (code === 'IDEMPOTENCY_KEY_REUSE') return 'applied';
+    if (code === 'OFFLINE' || code === 'NETWORK' || code === 'TIMEOUT' || code === 'RATE_LIMITED') return 'defer';
+    if (status === 408 || status === 429) return 'defer';
+    if (status !== undefined && status >= 400 && status < 500) return 'permanent';
+    if (PERMANENT_SYNC_CODES.includes(code)) return 'permanent';
+    return 'retry';
+};
+
+/**
  * Drain the retryable outbox.
  *
- * Retry policy:
+ * Retry policy (see `classifySyncError`):
  *  - success                                -> removed from the queue
  *  - IDEMPOTENCY_KEY_REUSE                  -> already applied by the server, removed
- *  - OFFLINE / unexpected                   -> retried (retryCount++), stays in syncQueue
+ *  - OFFLINE / 401 / 429 / timeout          -> kept, retryCount untouched, try again later
  *  - validation/stock/conflict/not-found    -> moved to `failedMutations` (dead-letter) at once,
  *                                              because retrying cannot make them valid
  *  - retries exhausted (MAX_SYNC_RETRIES)   -> moved to `failedMutations`
  * Dead-lettered mutations never sit in syncQueue again, so they can no longer block
- * hydration for every other change.
+ * hydration for every other change, and the queue can never fill with ghost items.
  */
 export const triggerSync = async (): Promise<boolean> => {
     const db = await initDB();
@@ -1684,8 +2403,6 @@ export const triggerSync = async (): Promise<boolean> => {
     // The finally block guarantees the flag always settles; setSyncState never throws.
     setSyncState({ syncing: true });
     try {
-        const TERMINAL_CODES = ['CONFLICT', 'VALIDATION_FAILED', 'INSUFFICIENT_STOCK', 'UNKNOWN_FARMER', 'UNKNOWN_PRODUCT', 'NOT_FOUND', 'AUTH_FAILED', 'FORBIDDEN'];
-
         let allSuccess = true;
         const deadLetter = async (mutation: any, code?: string, message?: string) => {
             await moveToFailedMutations(mutation.id, { code, message });
@@ -1727,15 +2444,20 @@ export const triggerSync = async (): Promise<boolean> => {
                     continue;
                 }
 
-                const code = apiRes?.error?.code;
-                const message = apiRes?.error?.message;
-                if (code === 'IDEMPOTENCY_KEY_REUSE') {
+                const failure = (apiRes as any)?.error as { code?: string; status?: number; message?: string } | undefined;
+                const code = failure?.code;
+                const message = failure?.message;
+                const disposition = classifySyncError(failure);
+
+                if (disposition === 'applied') {
                     // The server already applied this exact operationId - nothing left to do.
                     await db.delete('syncQueue', mutation.id);
-                } else if (code === 'OFFLINE') {
-                    allSuccess = false; // connectivity, not a data problem: retry later without burning attempts
-                } else if (TERMINAL_CODES.includes(code as string)) {
-                    await deadLetter(mutation, code, message);
+                } else if (disposition === 'defer') {
+                    // Connectivity/session/throttle: keep it and do NOT burn a retry attempt.
+                    allSuccess = false;
+                } else if (disposition === 'permanent') {
+                    await deadLetter(mutation, code || (failure?.status ? httpErrorCodeForStatus(failure.status) : 'VALIDATION_FAILED'), message);
+                    allSuccess = false;
                 } else {
                     await scheduleRetry(mutation, code || 'SERVER_ERROR', message);
                 }
@@ -1750,3 +2472,113 @@ export const triggerSync = async (): Promise<boolean> => {
         setSyncState({ syncing: false, lastSyncAt: Date.now() });
     }
 };
+
+/* ---------------------------------------------------------------- weighbridge API */
+
+export interface WeighbridgeQuery {
+    from?: string;
+    to?: string;
+    plate?: string;
+    status?: string;
+    /** all | done (خالص‌شده) | pending (در انتظار توزین دوم) */
+    net?: string;
+    q?: string;
+    limit?: number;
+    offset?: number;
+}
+
+const weighbridgeQuery = (query: WeighbridgeQuery = {}): string => {
+    const params = new URLSearchParams();
+    for (const key of ['from', 'to', 'plate', 'status', 'net', 'q'] as const) {
+        const value = query[key];
+        if (value !== undefined && value !== null && String(value).trim() !== '') params.set(key, String(value));
+    }
+    if (query.limit) params.set('limit', String(query.limit));
+    if (query.offset) params.set('offset', String(query.offset));
+    const qs = params.toString();
+    return qs ? `?${qs}` : '';
+};
+
+/** GET /api/weighbridge/records — server-side filtered/paged ticket list + status counters. */
+export const fetchWeighbridgeRecords = (query: WeighbridgeQuery = {}) =>
+    sendRestRequest<WeighbridgeListResult>(`/api/weighbridge/records${weighbridgeQuery(query)}`, { cache: 'no-store' });
+
+/** GET /api/weighbridge/records/:id — the ticket plus its linked invoice. */
+export const fetchWeighbridgeRecord = (id: number) =>
+    sendRestRequest<WeighbridgeRecord>(`/api/weighbridge/records/${id}`, { cache: 'no-store' });
+
+/** GET /api/weighbridge/stats — counters + sync metadata. */
+export const fetchWeighbridgeStats = () =>
+    sendRestRequest<WeighbridgeStats>('/api/weighbridge/stats', { cache: 'no-store' });
+
+/** GET /api/weighbridge/records/:id/candidates — entry/exit invoices near the weigh date. */
+export const fetchWeighbridgeCandidates = (id: number, type: 'entry' | 'exit', days = 5, q = '') => {
+    const params = new URLSearchParams({ type, days: String(days) });
+    if (q.trim()) params.set('q', q.trim());
+    return sendRestRequest<WeighbridgeCandidatesResult>(
+        `/api/weighbridge/records/${id}/candidates?${params.toString()}`,
+        { cache: 'no-store' }
+    );
+};
+
+/** POST /api/weighbridge/records/:id/map — link the ticket to an invoice and write its net weight. */
+export const mapWeighbridgeRecord = (id: number, invoiceId: string) =>
+    sendRestRequest<{ recordId: number; invoiceId: string; invoiceType: string; column: string; previousValue: number | null; netWeight: number | null }>(
+        `/api/weighbridge/records/${id}/map`,
+        { method: 'POST', body: JSON.stringify({ invoiceId }) }
+    );
+
+/** POST /api/weighbridge/records/:id/unmap — remove the link (restoring the invoice's previous weight). */
+export const unmapWeighbridgeRecord = (id: number) =>
+    sendRestRequest<{ recordId: number; invoiceId: string; weightReverted: boolean; restoredValue: number | null }>(
+        `/api/weighbridge/records/${id}/unmap`,
+        { method: 'POST', body: JSON.stringify({}) }
+    );
+
+/** PATCH /api/weighbridge/records/:id/direction — manual entry/exit override (survives re-syncs). */
+export const setWeighbridgeDirection = (id: number, direction: 'entry' | 'exit') =>
+    sendRestRequest<{ id: number; direction: string }>(`/api/weighbridge/records/${id}/direction`, {
+        method: 'PATCH',
+        body: JSON.stringify({ direction }),
+    });
+
+/** POST /api/weighbridge/sync — run the weighbridge worker once, now, and return its log. */
+export const triggerWeighbridgeSync = () =>
+    sendRestRequest<{ exitCode: number | null; timedOut: boolean; log: string }>('/api/weighbridge/sync', {
+        method: 'POST',
+        body: JSON.stringify({}),
+    });
+
+/**
+ * POST /api/weighbridge/records/:id/create-remittance
+ * Creates the entry (purchase) or exit (sale) invoice from the ticket and links them, in one
+ * transaction on the server. `payload` carries the operator-confirmed fields.
+ */
+export const createRemittanceFromWeighbridge = (
+    id: number,
+    payload: {
+        type: 'entry' | 'exit';
+        date: string;
+        productId: string;
+        productName?: string;
+        weight?: number | string | null;
+        farmerId?: string;
+        farmerName?: string;
+        driverName?: string;
+        driverPhone?: string;
+        driverIBAN?: string;
+        billNumber?: string;
+        billWeight?: number | string | null;
+        origin?: string;
+        sellerName?: string;
+        invoiceNumber?: string;
+        transportCost?: number | string | null;
+        notes?: string;
+        productVariant?: string;
+    }
+) =>
+    sendRestRequest<{ recordId: number; invoiceId: string; invoiceType: string; weightWritten: number | null; date: string }>(
+        `/api/weighbridge/records/${id}/create-remittance`,
+        { method: 'POST', body: JSON.stringify(payload) }
+    );
+

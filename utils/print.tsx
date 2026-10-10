@@ -300,7 +300,17 @@ export const PrintRemittanceLayout: React.FC<{
     const farmers = getFarmers();
     const farmerMap = new Map(farmers.map(f => [f.id, f.name]));
     const pageSetting = options?.pageSettings?.[pageNumber ? pageNumber - 1 : 0];
-    const printTitle = pageSetting?.title || options?.customPrintTitle || (type === 'entry' ? settings.entryPrintTitle : settings.exitPrintTitle);
+    // Title precedence, fixed so a custom title is never limited to page 1:
+    //   1) this page's own override, 2) the MASTER title (page 1's field, i.e. whatever the user
+    //   typed once), 3) the per-print custom title, 4) the page-type title from Settings.
+    // Previously pages 2..n ignored page 1's title entirely, so the custom title "disappeared"
+    // on every subsequent page.
+    const masterTitle = (options?.pageSettings?.[0]?.title || '').trim();
+    const printTitle =
+        (pageSetting?.title || '').trim() ||
+        masterTitle ||
+        options?.customPrintTitle ||
+        (type === 'entry' ? settings.entryPrintTitle : settings.exitPrintTitle);
     const pageDescription = pageSetting?.description;
     const globalDescription = isLastPage ? options?.generalDescription : null;
     const signatures = type === 'entry' ? settings.entrySignatures : settings.exitSignatures;

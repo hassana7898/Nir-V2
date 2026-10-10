@@ -19,12 +19,15 @@ import farmersRouter from "./server/routes/farmers";
 import driversRouter from "./server/routes/drivers";
 import originsRouter from "./server/routes/origins";
 import invoicesRouter from "./server/routes/invoices";
+import auditRouter from "./server/routes/audit";
+import reportsRouter from "./server/routes/reports";
 import inventoryRouter from "./server/routes/inventory";
 import productionRouter from "./server/routes/production";
 import formulasRouter from "./server/routes/formulas";
 import warehousesRouter from "./server/routes/warehouses";
 import usersRouter from "./server/routes/users";
 import syncRouter from "./server/routes/sync";
+import weighbridgeRouter from "./server/routes/weighbridge";
 import backupRouter from "./server/routes/backup";
 import { restoreLegacySnapshot } from "./server/services/legacyImport";
 import uploadRouter from "./server/routes/uploads";
@@ -84,6 +87,8 @@ app.use("/api/farmers", apiRateLimiter, requireAuth, blockViewerWrites, farmersR
 app.use("/api/drivers", apiRateLimiter, requireAuth, blockViewerWrites, driversRouter);
 app.use("/api/origins", apiRateLimiter, requireAuth, blockViewerWrites, originsRouter);
 app.use("/api/invoices", apiRateLimiter, requireAuth, blockViewerWrites, invoicesRouter);
+app.use("/api/audit", apiRateLimiter, requireAuth, blockViewerWrites, auditRouter);
+app.use("/api/reports", apiRateLimiter, requireAuth, blockViewerWrites, reportsRouter);
 app.use("/api/inventory", apiRateLimiter, requireAuth, blockViewerWrites, inventoryRouter);
 app.use("/api/production", apiRateLimiter, requireAuth, blockViewerWrites, productionRouter);
 app.use("/api/formulas", apiRateLimiter, requireAuth, blockViewerWrites, formulasRouter);
@@ -92,6 +97,7 @@ app.use("/api/users", apiRateLimiter, requireAuth, blockViewerWrites, usersRoute
 app.use("/api/sync", apiRateLimiter, requireAuth, blockViewerWrites, syncRouter);
 app.use("/api/backup", apiRateLimiter, requireAuth, blockViewerWrites, backupRouter);
 app.use("/api/uploads", apiRateLimiter, requireAuth, blockViewerWrites, uploadRouter);
+app.use("/api/weighbridge", apiRateLimiter, requireAuth, blockViewerWrites, weighbridgeRouter);
 
 // ---------------------------------------------------------------- AI extraction
 let ai: GoogleGenAI | null = null;

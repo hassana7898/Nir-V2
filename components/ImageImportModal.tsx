@@ -500,8 +500,8 @@ const ImageImportModal: React.FC<ImageImportModalProps> = ({ isOpen, onClose, on
             }
 
             for (const row of validRows) {
-                 const fName = row.farmerName?.trim();
-                 const farmerId = farmersMap.get(fName);
+                 const fName = String(row.farmerName ?? '').trim();
+                 const farmerId = fName ? farmersMap.get(fName) : undefined;
                  const pName = row.productName?.trim();
                  const product = currentSettings.products.find(p => p.name === pName);
                  

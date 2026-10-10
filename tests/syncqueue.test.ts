@@ -5,6 +5,7 @@ import {
   initDB,
   enqueueMutation,
   getPendingMutations,
+  getPendingMutationCount,
   getSyncQueueCount,
   moveToFailedMutations,
   getFailedMutationList,
@@ -12,8 +13,10 @@ import {
   requeueFailedMutation,
   discardFailedMutation,
   clearFailedMutations,
+  clearSyncQueue,
   MAX_SYNC_RETRIES,
 } from '../services/dbStore';
+import { classifySyncError, httpErrorCodeForStatus } from '../services/dataService';
 
 // Rule: "Failed validations go to failedMutations queue, NOT the active syncQueue."
 // A permanently failing mutation must never keep blocking every other change.
@@ -90,4 +93,66 @@ test('discard and clear remove dead letters without touching the active queue', 
 
 test('the retry cap is bounded and documented', () => {
   assert.equal(MAX_SYNC_RETRIES, 5);
+});
+
+// ------------------------------------------------------ stuck-queue fixes (permanent failures)
+
+test('clearSyncQueue purges the retryable outbox but keeps the dead-letter review list', async () => {
+  await reset();
+  await enqueue('op-1');
+  await enqueue('op-2');
+  await enqueue('op-dead');
+  await moveToFailedMutations('op-dead', { code: 'VALIDATION_FAILED' });
+  assert.equal(await getSyncQueueCount(), 2);
+
+  const dropped = await clearSyncQueue();
+
+  assert.equal(dropped, 2, 'the purge reports how many mutations were dropped');
+  assert.equal(await getSyncQueueCount(), 0, 'the ghost items are gone');
+  assert.equal(await getPendingMutationCount(), 0);
+  assert.equal(await getFailedMutationCount(), 1, 'dead letters stay reviewable / requeueable');
+});
+
+test('getPendingMutationCount only counts status=pending mutations', async () => {
+  await reset();
+  await enqueue('op-a');
+  await enqueue('op-b');
+  assert.equal(await getPendingMutationCount(), 2);
+  await moveToFailedMutations('op-b', { code: 'CONFLICT' });
+  assert.equal(await getPendingMutationCount(), 1);
+});
+
+test('a 400/422 rejection is classified PERMANENT so it is dead-lettered instead of retried forever', () => {
+  // The server answers some sync failures with an unstructured body (server/routes/sync.ts),
+  // so the HTTP status alone must decide.
+  assert.equal(classifySyncError({ status: 400, message: 'Invalid sync mutation.' }), 'permanent');
+  assert.equal(classifySyncError({ status: 422, code: 'VALIDATION_FAILED' }), 'permanent');
+  assert.equal(classifySyncError({ status: 409, code: 'CONFLICT' }), 'permanent');
+  assert.equal(classifySyncError({ code: 'UNKNOWN_FARMER' }), 'permanent');
+  assert.equal(classifySyncError({ code: 'INSUFFICIENT_STOCK' }), 'permanent');
+});
+
+test('connectivity, session expiry and throttling are DEFERRED (no retry budget is burnt)', () => {
+  assert.equal(classifySyncError({ code: 'OFFLINE' }), 'defer');
+  assert.equal(classifySyncError({ status: 401, code: 'AUTH_FAILED' }), 'defer');
+  assert.equal(classifySyncError({ status: 429, code: 'RATE_LIMITED' }), 'defer');
+  assert.equal(classifySyncError({ status: 408 }), 'defer');
+  assert.equal(classifySyncError({ code: 'NETWORK' }), 'defer');
+});
+
+test('an already-applied operation is dropped, and a 5xx still retries', () => {
+  assert.equal(classifySyncError({ code: 'IDEMPOTENCY_KEY_REUSE' }), 'applied');
+  assert.equal(classifySyncError({ status: 500, code: 'SERVER_ERROR' }), 'retry');
+  assert.equal(classifySyncError(undefined), 'retry');
+});
+
+test('httpErrorCodeForStatus maps every HTTP failure class to a contract code', () => {
+  assert.equal(httpErrorCodeForStatus(400), 'VALIDATION_FAILED');
+  assert.equal(httpErrorCodeForStatus(422), 'VALIDATION_FAILED');
+  assert.equal(httpErrorCodeForStatus(401), 'AUTH_FAILED');
+  assert.equal(httpErrorCodeForStatus(403), 'FORBIDDEN');
+  assert.equal(httpErrorCodeForStatus(404), 'NOT_FOUND');
+  assert.equal(httpErrorCodeForStatus(409), 'CONFLICT');
+  assert.equal(httpErrorCodeForStatus(429), 'RATE_LIMITED');
+  assert.equal(httpErrorCodeForStatus(503), 'SERVER_ERROR');
 });

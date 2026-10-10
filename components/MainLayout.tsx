@@ -9,6 +9,7 @@ import SyncStatusIndicator from './SyncStatusIndicator';
 import EntryPage from '../pages/EntryPage';
 import ExitPage from '../pages/ExitPage';
 import ReportsPage from '../pages/ReportsPage';
+import ReportsDashboard from '../pages/ReportsDashboard';
 import LogPage from '../pages/LogPage';
 import SettingsPage from '../pages/SettingsPage';
 import InventoryPage from '../pages/InventoryPage';
@@ -18,6 +19,7 @@ import FarmersPage from '../pages/FarmersPage';
 import ActiveBroodsPage from '../pages/ActiveBroodsPage';
 import DashboardPage from '../pages/DashboardPage';
 import GlobalSearchPage from '../pages/GlobalSearchPage';
+import WeighbridgePage from '../pages/WeighbridgePage';
 
 const MainLayout: React.FC = () => {
     const { loadSettings, settings } = useSettings();
@@ -86,11 +88,13 @@ const MainLayout: React.FC = () => {
                         <Route path="/exit" element={<ExitPage />} />
                         <Route path="/farmers" element={<FarmersPage />} />
                         <Route path="/broods" element={<ActiveBroodsPage />} />
-                        <Route path="/inventory" element={<InventoryPage />} />
-                        <Route path="/inventory-analysis" element={<InventoryAnalysisPage />} />
-                        <Route path="/production" element={<ProductionPage />} />
+                        <Route path="/inventory" element={settings.enabledMenus?.warehouses !== false ? <InventoryPage /> : <Navigate to="/dashboard" replace />} />
+                        <Route path="/inventory-analysis" element={settings.enabledMenus?.inventoryAnalysis !== false ? <InventoryAnalysisPage /> : <Navigate to="/dashboard" replace />} />
+                        <Route path="/production" element={settings.enabledMenus?.production !== false ? <ProductionPage /> : <Navigate to="/dashboard" replace />} />
+                        <Route path="/weighbridge" element={settings.enabledMenus?.weighbridge !== false ? <WeighbridgePage /> : <Navigate to="/dashboard" replace />} />
                         <Route path="/global-search" element={<GlobalSearchPage />} />
                         <Route path="/reports" element={<ReportsPage />} />
+                        <Route path="/reports-dashboard" element={<ReportsDashboard />} />
                         <Route path="/log" element={<LogPage />} />
                         <Route path="/settings" element={<SettingsPage />} />
                     </Routes>

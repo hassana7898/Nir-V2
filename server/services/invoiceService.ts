@@ -1,7 +1,7 @@
 import { and, eq, isNotNull, isNull, notInArray, sql } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { db } from '../db';
-import { invoices, inventory_transactions, products, farmers } from '../db/schema';
+import { invoices, inventory_transactions, products, farmers, weighbridge_records } from '../db/schema';
 import { getInventoryStockByDate, recordInventoryTransaction, createReversingTransaction, recalculateLedgerBalances, recalculateProductStock } from './inventoryService';
 import { recordAudit, buildInvoiceDiff, describeChanges, type AuditActor } from './auditService';
 import { farmerNameKey, normalizePersianText } from '../../shared/persianText';
@@ -336,6 +336,12 @@ export const deleteInvoiceInTransaction = async (tx: any, id: string, actor?: Au
 
   await tx.update(invoices).set({ deletedAt: new Date(), updatedAt: new Date(), version: sql`${invoices.version} + 1` }).where(eq(invoices.id, id));
   await createReversingTransaction(tx, id);
+  // Free any weighbridge ticket that pointed at this invoice: otherwise the weighbridge screen kept
+  // showing «✓ متصل / تخصیص داده شده» for a remittance the operator had just deleted.
+  await tx
+    .update(weighbridge_records)
+    .set({ status: 'unmapped', mappedRemittanceId: null, previousWeightValue: null, updatedAt: new Date() })
+    .where(eq(weighbridge_records.mappedRemittanceId, id));
 
   const qty = row && row.type === 'exit' ? row.weight : row?.scaleWeight;
   await recordAudit(tx, actor, {

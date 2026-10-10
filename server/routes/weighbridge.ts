@@ -370,7 +370,9 @@ router.get("/records", async (req, res) => {
           sellerName: invoices.sellerName,
         })
         .from(invoices)
-        .where(inArray(invoices.id, linkedIds));
+        // A soft-deleted invoice must never count as «متصل»: the ticket is shown as unmapped until
+        // the reconciliation (worker or delete path) clears the dangling link.
+        .where(and(inArray(invoices.id, linkedIds), isNull(invoices.deletedAt)));
       linked = Object.fromEntries((await withCustomerNames(invRows)).map((r: any) => [r.id, r]));
     }
 
@@ -505,7 +507,14 @@ router.get("/records/:id", async (req, res) => {
     let invoice: any = null;
     if ((rec as any).mappedRemittanceId) {
       invoice =
-        (await db.select().from(invoices).where(eq(invoices.id, (rec as any).mappedRemittanceId)).limit(1))[0] || null;
+        (
+          await db
+            .select()
+            .from(invoices)
+            // Soft-deleted invoices are treated as "no link" (the ticket simply shows as unmapped).
+            .where(and(eq(invoices.id, (rec as any).mappedRemittanceId), isNull(invoices.deletedAt)))
+            .limit(1)
+        )[0] || null;
     }
     const enriched = enrichFromPayload({ ...rec, invoice: invoice ? (await withCustomerNames([invoice]))[0] : null });
     if ((rec as any).mappedRemittanceId) return res.json({ success: true, data: enriched });

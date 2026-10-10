@@ -277,6 +277,13 @@ const buildUpsert = (existing: Set<string>) => {
     }
     return `${c} = EXCLUDED.${c}`;
   });
+  const compareCols = names.filter((c) => c !== 'external_id' && c !== 'direction');
+  // Skip the write entirely when nothing about the row actually changed: re-writing all 1,400+
+  // tickets every two minutes produced megabytes of write churn (dead tuples + WAL) that slowed the
+  // whole database down. `IS DISTINCT FROM` also handles NULLs correctly.
+  const distinctGuard = compareCols.length
+    ? `WHERE (${compareCols.map((c) => `weighbridge_records.${c}`).join(', ')}) IS DISTINCT FROM (${compareCols.map((c) => `EXCLUDED.${c}`).join(', ')})`
+    : '';
   const text = `
 INSERT INTO weighbridge_records
   (${names.join(', ')}, last_synced_at, created_at, updated_at)
@@ -285,6 +292,7 @@ ON CONFLICT (external_id) DO UPDATE SET
   ${sets.join(',\n  ')},
   last_synced_at = NOW(),
   updated_at = NOW()
+${distinctGuard}
 RETURNING (xmax = 0) AS inserted
 `;
   return {
@@ -464,9 +472,23 @@ const main = async () => {
   const client = new pg.Client({ connectionString: cfg.databaseUrl, connectionTimeoutMillis: 10000 });
   let inserted = 0;
   let updated = 0;
+  let unchanged = 0;
   let skipped = 0;
   try {
     await client.connect();
+    // Keep «حواله / مغایرت» honest: a ticket whose invoice was deleted (or unlinked) elsewhere is
+    // freed here, so the weighbridge screen can never claim it is still assigned.
+    try {
+      const freed = await client.query(
+        `UPDATE weighbridge_records
+            SET status = 'unmapped', mapped_remittance_id = NULL, previous_weight_value = NULL, updated_at = NOW()
+          WHERE mapped_remittance_id IS NOT NULL
+            AND mapped_remittance_id NOT IN (SELECT id FROM invoices WHERE deleted_at IS NULL)`
+      );
+      if (freed.rowCount) log(`تخصیص ${freed.rowCount} قبض که حواله‌اش حذف/جدا شده بود آزاد شد.`, 'WARN');
+    } catch (error: any) {
+      log(`آشتی‌سازی تخصیص‌های یتیم ناموفق بود: ${describeError(error)}`, 'WARN');
+    }
     const upsert = buildUpsert(await availableColumns(client));
     for (const row of sourceRows) {
       const externalId = Number(row[map.externalId as string]);
@@ -518,10 +540,11 @@ const main = async () => {
       }
 
       const res = await client.query(upsert.text, upsert.params(payload));
-      if (res.rows?.[0]?.inserted) inserted += 1;
+      if (!res.rows || res.rows.length === 0) unchanged += 1; // nothing changed -> the write was skipped
+      else if (res.rows[0].inserted) inserted += 1;
       else updated += 1;
     }
-    log(`PostgreSQL: ${inserted} جدید، ${updated} به‌روزرسانی${skipped ? `، ${skipped} نامعتبر` : ''}${DRY_RUN ? ' (dry-run: چیزی نوشته نشد)' : ''}`);
+    log(`PostgreSQL: ${inserted} جدید، ${updated} به‌روزرسانی، ${unchanged} بدون تغییر${skipped ? `، ${skipped} نامعتبر` : ''}${DRY_RUN ? ' (dry-run: چیزی نوشته نشد)' : ''}`);
   } catch (error: any) {
     log(`نوشتن در PostgreSQL ناموفق بود: ${describeError(error)}`, 'ERROR');
   } finally {

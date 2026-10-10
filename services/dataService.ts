@@ -2589,7 +2589,8 @@ export const createRemittanceFromWeighbridge = async (
 
     // The invoice is created on the server; mirror it into the local cache so the day's Entry/Exit
     // screens show it immediately (previously it only appeared after a full reload/hydration).
-    const created: any = (res as any)?.invoice;
+    // NOTE: the API body is FLAT — { success, data: { …, invoice } } — so the row lives in `.data`.
+    const created: any = (res as any)?.data?.invoice ?? (res as any)?.invoice;
     if (res.success && created) {
         try {
             const mapped: any = mapServerInvoice(created);

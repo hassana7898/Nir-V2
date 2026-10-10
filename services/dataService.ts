@@ -2554,7 +2554,7 @@ export const triggerWeighbridgeSync = () =>
  * Creates the entry (purchase) or exit (sale) invoice from the ticket and links them, in one
  * transaction on the server. `payload` carries the operator-confirmed fields.
  */
-export const createRemittanceFromWeighbridge = (
+export const createRemittanceFromWeighbridge = async (
     id: number,
     payload: {
         type: 'entry' | 'exit';
@@ -2576,9 +2576,38 @@ export const createRemittanceFromWeighbridge = (
         notes?: string;
         productVariant?: string;
     }
-) =>
-    sendRestRequest<{ recordId: number; invoiceId: string; invoiceType: string; weightWritten: number | null; date: string }>(
-        `/api/weighbridge/records/${id}/create-remittance`,
-        { method: 'POST', body: JSON.stringify(payload) }
-    );
+) => {
+    const res = await sendRestRequest<{
+        recordId: number;
+        invoiceId: string;
+        invoiceType: string;
+        weightWritten: number | null;
+        date: string;
+        invoice?: any;
+    }>(`/api/weighbridge/records/${id}/create-remittance`, { method: 'POST', body: JSON.stringify(payload) });
+
+    // The invoice is created on the server; mirror it into the local cache so the day's Entry/Exit
+    // screens show it immediately (previously it only appeared after a full reload/hydration).
+    const created: any = (res as any)?.invoice;
+    if (res.success && created) {
+        try {
+            const mapped: any = mapServerInvoice(created);
+            const all = [...getAllInvoices()];
+            if (!all.some((inv: any) => inv.id === mapped.id)) {
+                all.push(mapped);
+                await saveAllInvoices(all as any);
+                // Append to the day's manual order so the new row lands at the bottom of that day.
+                const key = `sortOrder_${mapped.type}_${mapped.date}`;
+                const cur = JSON.parse(localStorage.getItem(key) || '[]');
+                if (Array.isArray(cur) && !cur.includes(mapped.id)) {
+                    cur.push(mapped.id);
+                    localStorage.setItem(key, JSON.stringify(cur));
+                }
+            }
+        } catch (error) {
+            console.warn('[weighbridge] local cache sync after create-remittance failed', error);
+        }
+    }
+    return res;
+};
 

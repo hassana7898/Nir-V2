@@ -8,7 +8,7 @@ import { farmers, invoices, weighbridge_records } from "../db/schema";
 import { requireRole } from "../middleware/auth";
 import { actorFromRequest, recordAudit } from "../services/auditService";
 import { createInvoiceInTransaction } from "../services/invoiceService";
-import { addDays, dayDistance, jalaliWindow, plateKey, toJalali } from "../../shared/jalali";
+import { addDays, dayDistance, jalaliWindow, plateKey, toGregorian, toJalali } from "../../shared/jalali";
 
 /**
  * Weighbridge (باسکول توزین نگار) API.
@@ -69,6 +69,31 @@ const jalaliDayOfWeigh = (v: unknown): string => {
 /** The invoice column that carries the scale weight: entry -> scale_weight, exit -> weight. */
 export const weightColumnFor = (invoiceType: string): "scaleWeight" | "weight" =>
   String(invoiceType).toLowerCase() === "entry" ? "scaleWeight" : "weight";
+
+/**
+ * `invoices.date` is canonically **ISO Gregorian** (`YYYY-MM-DD`) everywhere in this app (the UI
+ * renders it as Jalali). This normalises any input to that contract:
+ *  - ISO (`2026-10-10`) stays as-is,
+ *  - Jalali (`1405/07/18` — e.g. sent by the weighbridge form) is converted,
+ *  - otherwise the Gregorian day of the weighing timestamp is used.
+ *
+ * Regression it fixes: invoices created from a weighing ticket used to be stored with a JALALI
+ * date, so the day screens (which match `date === formatToISODate(day)`) never showed them.
+ */
+const isoInvoiceDate = (value: unknown, fallbackWeighTime: unknown): string => {
+  const s = String(value ?? "").trim();
+  const m = /^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/.exec(s);
+  if (m) {
+    const y = Number(m[1]);
+    const mo = Number(m[2]);
+    const d = Number(m[3]);
+    if (y >= 1700) return `${m[1]}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    const g = toGregorian(y, mo, d);
+    return `${g.gy}-${String(g.gm).padStart(2, "0")}-${String(g.gd).padStart(2, "0")}`;
+  }
+  const w = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(fallbackWeighTime ?? ""));
+  return w ? `${w[1]}-${w[2]}-${w[3]}` : new Date().toISOString().slice(0, 10);
+};
 
 const statusCounts = async () => {
   const rows = await db
@@ -943,9 +968,9 @@ router.post("/records/:id/create-remittance", requireRole("ADMIN", "MANAGER"), a
       const net = asNumber(rec.netWeight);
       const typedWeight = asNumber(b.weight);
       const weight = typedWeight !== null ? typedWeight : net;
-      // `invoices.date` is Jalali `YYYY/MM/DD`, so the invoice must carry the JALALI day of the
-      // ticket's Tehran wall-clock weigh_time (never the Gregorian ISO day).
-      const date = asText(b.date) || jalaliDayOfWeigh((rec as any).weighTime) || isoDayOf((rec as any).weighTime);
+      // `invoices.date` is stored ISO (`YYYY-MM-DD`) like the rest of the app (the UI renders it
+      // Jalali); Jalali input from the weighbridge form is converted here.
+      const date = isoInvoiceDate(asText(b.date), (rec as any).weighTime);
       // شماره حواله comes from the scale's own ShomareHavale on fully-weighed tickets — it is NOT
       // the ticket serial (external_id), and an incomplete ticket has no remittance number yet.
       const scaleHavale =
@@ -1014,7 +1039,10 @@ router.post("/records/:id/create-remittance", requireRole("ADMIN", "MANAGER"), a
         details: `ایجاد حواله ${type === "entry" ? "ورود" : "خروج"} از قبض باسکول ${ticket}${plate ? ` (پلاک ${plate})` : ""} و اتصال آن — وزن: ${weight ?? "-"}`,
       });
 
-      return { recordId: id, invoiceId, invoiceType: type, weightWritten: weight, date };
+      // Return the created row so the client can mirror it into its local cache immediately
+      // (otherwise the day screens would only show it after a full reload/hydration).
+      const created = (await tx.select().from(invoices).where(eq(invoices.id, invoiceId)).limit(1))[0] || null;
+      return { recordId: id, invoiceId, invoiceType: type, weightWritten: weight, date, invoice: created };
     });
 
     return res.json({ success: true, data: result, message: "حواله ایجاد و قبض باسکول به آن متصل شد" });

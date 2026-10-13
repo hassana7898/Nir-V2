@@ -1,5 +1,5 @@
 
-import { Settings, Entry, Exit, Log, Remittance, Product, Formula, ProductionRecord, InventoryAdjustment, Farmer, Brood, WeighbridgeListResult, WeighbridgeRecord, WeighbridgeStats, WeighbridgeCandidatesResult } from '../types';
+import { Settings, Entry, Exit, Log, Remittance, Product, Formula, ProductionRecord, InventoryAdjustment, Farmer, Brood, WeighbridgeListResult, WeighbridgeRecord, WeighbridgeStats, WeighbridgeCandidatesResult, WeighbridgeReport, WeighbridgeDayGoodsReport } from '../types';
 import { formatToISODate, formatDate } from '../utils/formatters';
 
 import { ApiResponse, ApiError, ApiErrorCode } from '../shared/apiContract';
@@ -2482,22 +2482,48 @@ export interface WeighbridgeQuery {
     status?: string;
     /** all | done (خالص‌شده) | pending (در انتظار توزین دوم) */
     net?: string;
+    /** entry | exit | unknown — the weighing software's own in/out flag. */
+    direction?: string;
+    /** Matches the ticket's «نوع کالا» (Goods) as a substring. */
+    goods?: string;
+    /** Net-weight window in kg («جستجوی وزن»). */
+    minNet?: number | string;
+    maxNet?: number | string;
     q?: string;
     limit?: number;
     offset?: number;
+    /** Report only: how many rows the customer/plate tables return. */
+    topCustomers?: number;
 }
 
 const weighbridgeQuery = (query: WeighbridgeQuery = {}): string => {
     const params = new URLSearchParams();
-    for (const key of ['from', 'to', 'plate', 'status', 'net', 'q'] as const) {
+    for (const key of ['from', 'to', 'plate', 'status', 'net', 'q', 'direction', 'goods', 'minNet', 'maxNet'] as const) {
         const value = query[key];
         if (value !== undefined && value !== null && String(value).trim() !== '') params.set(key, String(value));
     }
     if (query.limit) params.set('limit', String(query.limit));
     if (query.offset) params.set('offset', String(query.offset));
+    if (query.topCustomers) params.set('topCustomers', String(query.topCustomers));
     const qs = params.toString();
     return qs ? `?${qs}` : '';
 };
+
+/**
+ * GET /api/weighbridge/report — aggregates for the «گزارش‌گیری» tab: totals, per-کالا detail, the
+ * daily time series, the entry/exit split and the top customers/plates. Accepts the same filters as
+ * the ticket list.
+ */
+export const fetchWeighbridgeReport = (query: WeighbridgeQuery = {}) =>
+    sendRestRequest<WeighbridgeReport>(`/api/weighbridge/report${weighbridgeQuery(query)}`, { cache: 'no-store' });
+
+/**
+ * GET /api/weighbridge/report/daily — the «روز × کالا» detail of the report (one line per day and
+ * کالا, with the day's own total), fetched on demand when the operator opens or prints the daily
+ * breakdown so a full-year report never ships thousands of rows to the browser.
+ */
+export const fetchWeighbridgeDailyReport = (query: WeighbridgeQuery = {}) =>
+    sendRestRequest<WeighbridgeDayGoodsReport>(`/api/weighbridge/report/daily${weighbridgeQuery(query)}`, { cache: 'no-store' });
 
 /** GET /api/weighbridge/records — server-side filtered/paged ticket list + status counters. */
 export const fetchWeighbridgeRecords = (query: WeighbridgeQuery = {}) =>

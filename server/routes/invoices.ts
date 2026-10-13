@@ -13,8 +13,8 @@ import { executeIdempotentOperation } from '../services/idempotencyService';
 import { actorFromRequest } from '../services/auditService';
 import { createSuccessResponse, createErrorResponse, toApiError } from '../../shared/apiContract';
 import { db } from '../db';
-import { invoices } from '../db/schema';
-import { eq } from 'drizzle-orm';
+import { invoices, products } from '../db/schema';
+import { eq, inArray } from 'drizzle-orm';
 
 const router = express.Router();
 
@@ -70,7 +70,29 @@ router.get('/', async (req, res) => {
     const farmerId = typeof req.query.farmerId === 'string' ? req.query.farmerId : undefined;
     const productId = typeof req.query.productId === 'string' ? req.query.productId : undefined;
     const result = await findInvoicesWithPagination({ page, limit, type, search, startDate, endDate, farmerId, productId });
-    res.json(result);
+
+    // Additive (Phase 2): `invoices.product_name` is empty on nearly every real row (measured on dev:
+    // entry 0/713, exit 3/2393) while `product_id` is set on 100% of them, so the mobile remittance
+    // screen showed the product as «نامشخص». The product master's own name is returned in a NEW field;
+    // `productName` itself is left untouched so the web screen keeps rendering exactly what it does today.
+    const rows = result.data as any[];
+    const missingProductIds = [
+      ...new Set(rows.filter((row) => !row.productName && row.productId).map((row) => String(row.productId))),
+    ];
+    if (missingProductIds.length) {
+      const productRows = await db
+        .select({ id: products.id, name: products.name })
+        .from(products)
+        .where(inArray(products.id, missingProductIds));
+      const nameById = new Map(productRows.map((p: any) => [String(p.id), String(p.name || '')]));
+      for (const row of rows) {
+        if (row.productName || !row.productId) continue;
+        const resolved = nameById.get(String(row.productId));
+        if (resolved) row.masterProductName = resolved;
+      }
+    }
+
+    res.json({ ...result, data: rows });
   } catch (error: any) {
     const { status, body } = toApiError(error);
     res.status(status).json(body);

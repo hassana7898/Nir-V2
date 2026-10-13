@@ -9,6 +9,7 @@ import { requireRole } from "../middleware/auth";
 import { actorFromRequest, recordAudit } from "../services/auditService";
 import { createInvoiceInTransaction, deleteInvoiceInTransaction } from "../services/invoiceService";
 import { addDays, dayDistance, jalaliWindow, plateKey, toGregorian, toJalali } from "../../shared/jalali";
+import { toAsciiDigits } from "../../shared/persianText";
 
 /**
  * Weighbridge (باسکول توزین نگار) API.
@@ -95,6 +96,27 @@ const isoInvoiceDate = (value: unknown, fallbackWeighTime: unknown): string => {
   return w ? `${w[1]}-${w[2]}-${w[3]}` : new Date().toISOString().slice(0, 10);
 };
 
+/**
+ * «خالص‌شده» (netted) — the ticket's SECOND weighing is done.
+ *
+ * WHY both weighings (the «خالص‌شده اشتباه» bug): the weighing software writes a ticket at the FIRST
+ * weighing and leaves the other weight column at 0 (`وزن پر` filled ⇒ «وزن خالی» = 0 and vice versa).
+ * A net computed as `gross - 0` is then just the gross — ticket 3593 stores 26,360 kg as «خالص» while
+ * the truck has only been weighed once — so `net_weight > 0` alone counted half-weighed tickets as
+ * netted in the list, in the status counters and in every report total.
+ *
+ * A ticket is netted only when BOTH `gross > 0` AND `tare > 0` AND `net > 0`; everything else is
+ * «در انتظار توزین دوم». This single predicate is shared by the list filter, the counters and the
+ * report, so the three can never disagree.
+ */
+const NETTED_SQL = sql`(coalesce(${weighbridge_records.netWeight}, 0) > 0 and coalesce(${weighbridge_records.grossWeight}, 0) > 0 and coalesce(${weighbridge_records.tareWeight}, 0) > 0)`;
+
+/** Server-side twin of it for plain JS rows (list/detail decorations). */
+const isNettedRow = (row: any): boolean =>
+  Number(row?.net_weight ?? row?.netWeight ?? 0) > 0 &&
+  Number(row?.gross_weight ?? row?.grossWeight ?? 0) > 0 &&
+  Number(row?.tare_weight ?? row?.tareWeight ?? 0) > 0;
+
 const statusCounts = async () => {
   const rows = await db
     .select({ status: weighbridge_records.status, value: sql<number>`count(*)::int` })
@@ -102,11 +124,11 @@ const statusCounts = async () => {
     .groupBy(weighbridge_records.status);
   const byStatus: Record<string, number> = { unmapped: 0, mapped: 0, archived: 0 };
   for (const r of rows) byStatus[String(r.status)] = Number(r.value) || 0;
-  // «خالص‌شده» = a NET weight exists (both weighings done); «در انتظار توزین دوم» = still pending.
+  // «خالص‌شده» = BOTH weighings done (see NETTED_SQL); «در انتظار توزین دوم» = still pending.
   const netRows = await db
     .select({
-      netted: sql<number>`count(*) FILTER (WHERE coalesce(${weighbridge_records.netWeight}, 0) > 0)::int`,
-      pending: sql<number>`count(*) FILTER (WHERE coalesce(${weighbridge_records.netWeight}, 0) <= 0)::int`,
+      netted: sql<number>`count(*) FILTER (WHERE ${NETTED_SQL})::int`,
+      pending: sql<number>`count(*) FILTER (WHERE not ${NETTED_SQL})::int`,
     })
     .from(weighbridge_records);
   return {
@@ -222,7 +244,8 @@ const enrichFromPayload = (row: any) => {
   const parsed = parseDirection(p);
   const flagDirection = stored === 'entry' || stored === 'exit' ? stored : parsed.direction;
   const net = Number(row?.netWeight ?? row?.net_weight ?? 0);
-  const netOk = Number.isFinite(net) && net > 0;
+  // «خالص‌شده» needs BOTH weighings (NETTED_SQL): a net that came from `gross - 0` is not a net at all.
+  const netOk = isNettedRow(row);
   // Priority (highest first) — the operator's rules:
   //  1) the invoice actually registered for this ticket (حواله ورود ⇒ ورود, حواله خروج ⇒ خروج);
   //  2) a manual override (direction_locked — the «ویرایش نوع» button), kept across re-syncs;
@@ -284,15 +307,17 @@ const enrichFromPayload = (row: any) => {
  * Filters: from, to (ISO dates, inclusive), plate (partial, digits/letters folded), status
  * (unmapped|mapped|archived|all), q (ticket / plate / driver / carrier), limit, offset.
  */
-router.get("/records", async (req, res) => {
-  try {
-    const limit = Math.min(500, Math.max(1, parseIntOr(req.query.limit, 100)));
-    const offset = Math.max(0, parseIntOr(req.query.offset, 0));
-    const status = String(req.query.status ?? "all").trim().toLowerCase();
+/**
+ * The ticket filter shared by the LIST (/records) and the REPORT (/report), so a filter always means
+ * the same thing in both. Every date bound is a plain text comparison on the wall-clock
+ * `weigh_time` (`YYYY-MM-DD ...`), so the server timezone can never reinterpret factory time.
+ */
+const buildRecordFilters = (query: any) => {
+    const status = String(query.status ?? "all").trim().toLowerCase();
 
     const where: any[] = [];
-    const from = asText(req.query.from);
-    const to = asText(req.query.to);
+    const from = asText(query.from);
+    const to = asText(query.to);
     // `weigh_time` is a wall-clock string, so bounds are compared as plain text (`YYYY-MM-DD ...`),
     // avoiding any server-timezone reinterpretation of the factory's local time.
     const dayOf = (v: string): string | null => {
@@ -306,7 +331,7 @@ router.get("/records", async (req, res) => {
     if ((WEIGHBRIDGE_STATUSES as readonly string[]).includes(status)) {
       where.push(eq(weighbridge_records.status, status));
     }
-    const plate = asText(req.query.plate);
+    const plate = asText(query.plate);
     if (plate) {
       const key = plateKey(plate);
       // Fold Persian/Arabic-Indic digits to ASCII in SQL as well: the stored plates are Persian
@@ -315,27 +340,57 @@ router.get("/records", async (req, res) => {
         sql`upper(regexp_replace(translate(coalesce(${weighbridge_records.plateNumber}, ''), '۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789'), '[^0-9A-Za-zآ-ی]', '', 'g')) like ${"%" + key + "%"}`
       );
     }
-    const q = asText(req.query.q);
+    const q = asText(query.q);
     if (q) {
       const like = `%${q}%`;
-      where.push(
-        or(
+      // «جستجوی وزن»: a numeric query ALSO matches the three weight columns, with Persian/Arabic-
+      // Indic digits folded to ASCII first, so «۲۵۰۰۰» finds the same tickets as «25000».
+      const weightDigits = toAsciiDigits(q).replace(/[^\d.]/g, '');
+      const terms: any[] = [
           sql`weighbridge_records.external_id::text ilike ${like}`,
           sql`coalesce(${weighbridge_records.remittanceNumber}, '') ilike ${like}`,
           sql`coalesce(${weighbridge_records.ticketNumber}, '') ilike ${like}`,
           sql`coalesce(${weighbridge_records.plateNumber}, '') ilike ${like}`,
           sql`coalesce(${weighbridge_records.driverName}, '') ilike ${like}`,
           sql`coalesce(${weighbridge_records.customerName}, '') ilike ${like}`
-        )
-      );
+      ];
+      if (weightDigits) {
+        terms.push(
+          sql`coalesce(${weighbridge_records.netWeight}::text, '') like ${"%" + weightDigits + "%"}`,
+          sql`coalesce(${weighbridge_records.grossWeight}::text, '') like ${"%" + weightDigits + "%"}`,
+          sql`coalesce(${weighbridge_records.tareWeight}::text, '') like ${"%" + weightDigits + "%"}`
+        );
+      }
+      where.push(or(...terms));
     }
 
-    // «خالص‌شده» (both weighings done, NET known) vs «در انتظار توزین دوم» (not yet netted).
-    const net = String(req.query.net ?? "all").trim().toLowerCase();
-    if (net === "done") where.push(sql`coalesce(${weighbridge_records.netWeight}, 0) > 0`);
-    else if (net === "pending") where.push(sql`coalesce(${weighbridge_records.netWeight}, 0) <= 0`);
+    // «خالص‌شده» (BOTH weighings done — NETTED_SQL) vs «در انتظار توزین دوم».
+    const net = String(query.net ?? "all").trim().toLowerCase();
+    if (net === "done") where.push(NETTED_SQL);
+    else if (net === "pending") where.push(sql`not ${NETTED_SQL}`);
+
+    // Extras used by the REPORT (they are harmless for the list, which simply never sends them):
+    // direction, goods and a net-weight window — the «جستجوی وزن» of the report filters.
+    const direction = asText(query.direction);
+    if (direction && ["entry", "exit", "unknown"].includes(direction)) {
+      where.push(eq(weighbridge_records.direction, direction));
+    }
+    const goods = asText(query.goods);
+    if (goods) where.push(sql`coalesce(${weighbridge_records.goods}, '') ilike ${"%" + goods + "%"}`);
+    const minNet = asNumber(query.minNet);
+    if (minNet !== null) where.push(sql`coalesce(${weighbridge_records.netWeight}, 0) >= ${minNet}`);
+    const maxNet = asNumber(query.maxNet);
+    if (maxNet !== null) where.push(sql`coalesce(${weighbridge_records.netWeight}, 0) <= ${maxNet}`);
 
     const condition = where.length ? and(...where) : undefined;
+  return { condition, where, fromDay, toDay };
+};
+
+router.get("/records", async (req, res) => {
+  try {
+    const limit = Math.min(500, Math.max(1, parseIntOr(req.query.limit, 100)));
+    const offset = Math.max(0, parseIntOr(req.query.offset, 0));
+    const { condition } = buildRecordFilters(req.query);
 
     const rows = await db
       .select()
@@ -387,8 +442,15 @@ router.get("/records", async (req, res) => {
           .filter((v: string | null): v is string => !!v)
       )
     );
+    // Only a NETTED ticket (both weighings — isNettedRow) can be fingerprinted by its net weight: a
+    // half-weighed ticket's «net» is not a real weight and must never match an invoice.
     const nets: number[] = Array.from(
-      new Set<number>(unmapped.map((r: any) => Number(r.netWeight)).filter((n: number) => Number.isFinite(n) && n > 0))
+      new Set<number>(
+        unmapped
+          .filter((r: any) => isNettedRow(r))
+          .map((r: any) => Number(r.netWeight))
+          .filter((n: number) => Number.isFinite(n) && n > 0)
+      )
     );
     const byHavale: Record<string, any[]> = {};
     const byWeight: Record<string, any[]> = {};
@@ -440,7 +502,7 @@ router.get("/records", async (req, res) => {
         const net = Number(r.netWeight);
         const picked = pickInvoice(
           havale ? byHavale[havale] || [] : [],
-          Number.isFinite(net) && net > 0 ? byWeight[String(net)] || [] : [],
+          isNettedRow(r) && Number.isFinite(net) && net > 0 ? byWeight[String(net)] || [] : [],
           enriched.direction,
           (r as any).weighTime
         );
@@ -491,6 +553,301 @@ router.get("/stats", async (_req, res) => {
     });
   } catch (error: any) {
     return res.status(500).json({ success: false, error: error?.message || "خطا در دریافت آمار باسکول" });
+  }
+});
+
+/**
+ * GET /api/weighbridge/report — the aggregates behind the «گزارش‌گیری» tab: grand totals, a per-کالا
+ * breakdown, the time series (always by DAY; the client buckets it into day/week/month), the
+ * entry/exit split, the top customers and the busiest plates.
+ *
+ * It accepts exactly the same filters as the ticket list (see buildRecordFilters) plus direction /
+ * goods / minNet / maxNet, so «جستجوی وزن» and every filter mean the same in both places.
+ */
+router.get("/report", async (req, res) => {
+  try {
+    const { condition, fromDay, toDay } = buildRecordFilters(req.query);
+    const where = condition as any;
+    const topCustomers = Math.min(300, Math.max(1, parseIntOr(req.query.topCustomers, 60)));
+
+    const w = weighbridge_records;
+    const toNum = (v: unknown): number => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    // Grouping + aggregate expressions, defined once and reused in select/groupBy so both clauses
+    // generate identical SQL.
+    const dayKey = sql<string>`left(coalesce(${w.weighTime}::text, ''), 10)`;
+    const goodsKey = sql<string>`coalesce(nullif(btrim(${w.goods}), ''), '—')`;
+    const customerKey = sql<string>`coalesce(nullif(btrim(${w.customerName}), ''), '—')`;
+    const directionKey = sql<string>`coalesce(nullif(btrim(${w.direction}), ''), 'unknown')`;
+    const plateKeySql = sql<string>`coalesce(nullif(btrim(${w.plateNumber}), ''), '—')`;
+    // Weight aggregates are computed over COMPLETE tickets only — «خالص‌شده» = BOTH weighings done,
+    // i.e. exactly NETTED_SQL (the same predicate the list filter uses).
+    //
+    // WHY (the «گزارش کاربردی نیست» bug): the weighing software stores a ticket as soon as the FIRST
+    // weighing happens — for a truck still waiting for its second weighing one weight column is 0 while
+    // the other holds the full load (e.g. 26,360 kg). Summing those raw values made a day's «وزن خالص»
+    // NEGATIVE (41% of the rows were like that: e.g. 2026-10-11 summed to -21,720 kg), and counting them
+    // as netted inflated وزن خالص by a truck-load that never got weighed twice. Incomplete tickets have
+    // no net weight at all, so they are counted (tickets/pending) but excluded from gross/tare/net/
+    // avg/min/max, and the weight they are holding is reported separately as pendingTare/pendingGross.
+    const complete = NETTED_SQL;
+    const grossSum = sql<string>`coalesce(sum(${w.grossWeight}) filter (where ${complete}), 0)`;
+    const tareSum = sql<string>`coalesce(sum(${w.tareWeight}) filter (where ${complete}), 0)`;
+    const netSum = sql<string>`coalesce(sum(${w.netWeight}) filter (where ${complete}), 0)`;
+    const avgNet = sql<string>`coalesce(avg(${w.netWeight}) filter (where ${complete}), 0)`;
+    const maxNet = sql<string>`coalesce(max(${w.netWeight}) filter (where ${complete}), 0)`;
+    const minNet = sql<string>`coalesce(min(${w.netWeight}) filter (where ${complete}), 0)`;
+    /** Truck weights that are sitting in tickets still waiting for their second weighing. */
+    const pendingTare = sql<string>`coalesce(sum(${w.tareWeight}) filter (where not (${complete})), 0)`;
+    const pendingGross = sql<string>`coalesce(sum(${w.grossWeight}) filter (where not (${complete})), 0)`;
+    const tickets = sql<number>`count(*)::int`;
+    const netted = sql<number>`count(*) filter (where ${complete})::int`;
+    const pending = sql<number>`count(*) filter (where not (${complete}))::int`;
+    const mapped = sql<number>`count(*) filter (where ${w.status} = 'mapped')::int`;
+    const unmapped = sql<number>`count(*) filter (where ${w.status} = 'unmapped')::int`;
+    const archived = sql<number>`count(*) filter (where ${w.status} = 'archived')::int`;
+    const entryTickets = sql<number>`count(*) filter (where ${w.direction} = 'entry')::int`;
+    const exitTickets = sql<number>`count(*) filter (where ${w.direction} = 'exit')::int`;
+    const firstDay = sql<string | null>`min(nullif(${dayKey}, ''))`;
+    const lastDay = sql<string | null>`max(nullif(${dayKey}, ''))`;
+
+    const [totalsRows, byGoodsRows, byDayRows, byDirectionRows, byCustomerRows, byPlateRows] = await Promise.all([
+      db
+        .select({
+          tickets, gross: grossSum, tare: tareSum, net: netSum, avgNet, maxNet, minNet, computedAt: sql`now()`,
+          netted, pending, mapped, unmapped, archived, entryTickets, exitTickets, firstDay, lastDay,
+          pendingTare: pendingTare,
+          pendingGross: pendingGross,
+          plates: sql<number>`count(distinct nullif(btrim(${w.plateNumber}), ''))::int`,
+          customers: sql<number>`count(distinct nullif(btrim(${w.customerName}), ''))::int`,
+        })
+        .from(w)
+        .where(where),
+
+      db
+        .select({
+          goods: goodsKey, tickets, gross: grossSum, tare: tareSum, net: netSum, avgNet, maxNet, minNet,
+          netted, pending, mapped, unmapped, archived, firstDay, lastDay,
+          pendingTare: pendingTare, pendingGross: pendingGross,
+        })
+        .from(w)
+        .where(where)
+        .groupBy(goodsKey)
+        .orderBy(desc(netSum)),
+
+      db
+        .select({
+          day: dayKey, tickets, gross: grossSum, tare: tareSum, net: netSum,
+          netted, pending, entryTickets, exitTickets, pendingTare: pendingTare, pendingGross: pendingGross,
+        })
+        .from(w)
+        .where(where)
+        .groupBy(dayKey)
+        .orderBy(asc(dayKey)),
+
+      db
+        .select({ direction: directionKey, tickets, gross: grossSum, tare: tareSum, net: netSum, pending: pending, pendingTare: pendingTare })
+        .from(w)
+        .where(where)
+        .groupBy(directionKey)
+        .orderBy(desc(netSum)),
+
+      db
+        .select({ customer: customerKey, tickets, gross: grossSum, tare: tareSum, net: netSum, lastDay, pending: pending })
+        .from(w)
+        .where(where)
+        .groupBy(customerKey)
+        .orderBy(desc(netSum))
+        .limit(topCustomers),
+
+      db
+        .select({ plate: plateKeySql, tickets, net: netSum, pending: pending })
+        .from(w)
+        .where(where)
+        .groupBy(plateKeySql)
+        .orderBy(desc(netSum))
+        .limit(topCustomers),
+    ]);
+
+    const t = totalsRows[0] as any;
+    return res.json({
+      success: true,
+      data: {
+        range: { from: fromDay, to: toDay },
+        totals: {
+          tickets: toNum(t?.tickets),
+          gross: toNum(t?.gross),
+          tare: toNum(t?.tare),
+          net: toNum(t?.net),
+          avgNet: toNum(t?.avgNet),
+          maxNet: toNum(t?.maxNet),
+          minNet: toNum(t?.minNet),
+          netted: toNum(t?.netted),
+          pending: toNum(t?.pending),
+          mapped: toNum(t?.mapped),
+          unmapped: toNum(t?.unmapped),
+          archived: toNum(t?.archived),
+          entryTickets: toNum(t?.entryTickets),
+          exitTickets: toNum(t?.exitTickets),
+          pendingTare: toNum(t?.pendingTare),
+          pendingGross: toNum(t?.pendingGross),
+          plates: toNum(t?.plates),
+          customers: toNum(t?.customers),
+          firstDay: t?.firstDay ?? null,
+          lastDay: t?.lastDay ?? null,
+        },
+        byGoods: byGoodsRows.map((r: any) => ({
+          goods: r.goods,
+          tickets: toNum(r.tickets),
+          gross: toNum(r.gross),
+          tare: toNum(r.tare),
+          net: toNum(r.net),
+          avgNet: toNum(r.avgNet),
+          maxNet: toNum(r.maxNet),
+          minNet: toNum(r.minNet),
+          netted: toNum(r.netted),
+          pending: toNum(r.pending),
+          mapped: toNum(r.mapped),
+          unmapped: toNum(r.unmapped),
+          archived: toNum(r.archived),
+          pendingTare: toNum(r.pendingTare),
+          pendingGross: toNum(r.pendingGross),
+          firstDay: r.firstDay ?? null,
+          lastDay: r.lastDay ?? null,
+        })),
+        byDay: byDayRows.map((r: any) => ({
+          day: r.day,
+          tickets: toNum(r.tickets),
+          gross: toNum(r.gross),
+          tare: toNum(r.tare),
+          net: toNum(r.net),
+          netted: toNum(r.netted),
+          pending: toNum(r.pending),
+          entryTickets: toNum(r.entryTickets),
+          exitTickets: toNum(r.exitTickets),
+          pendingTare: toNum(r.pendingTare),
+          pendingGross: toNum(r.pendingGross),
+        })),
+        byDirection: byDirectionRows.map((r: any) => ({
+          direction: r.direction,
+          tickets: toNum(r.tickets),
+          gross: toNum(r.gross),
+          tare: toNum(r.tare),
+          net: toNum(r.net),
+          pending: toNum(r.pending),
+          pendingTare: toNum(r.pendingTare),
+        })),
+        byCustomer: byCustomerRows.map((r: any) => ({
+          customer: r.customer,
+          tickets: toNum(r.tickets),
+          gross: toNum(r.gross),
+          tare: toNum(r.tare),
+          net: toNum(r.net),
+          pending: toNum(r.pending),
+          lastDay: r.lastDay ?? null,
+        })),
+        byPlate: byPlateRows.map((r: any) => ({
+          plate: r.plate,
+          tickets: toNum(r.tickets),
+          net: toNum(r.net),
+          pending: toNum(r.pending),
+        })),
+      },
+    });
+  } catch (error: any) {
+    console.error("[NIR WEIGHBRIDGE] report failed:", error?.message || error);
+    return res.status(500).json({ success: false, error: error?.message || "خطا در تهیه گزارش باسکول" });
+  }
+});
+
+/**
+ * GET /api/weighbridge/report/daily — the «روز × کالا» matrix behind the printable report.
+ *
+ * One line per (day, کالا) with the same filters as the list, so the operator can hand the accountant a
+ * sheet that shows, for each day, how much of EVERY کالا was weighed — plus a «جمع روز» per day and a
+ * «جمع کل» — instead of one figure for the whole period. Kept as its own endpoint (the report tab only
+ * calls it when the daily detail is opened or printed) so a full-year report never ships thousands of
+ * rows to the browser. `net`/`gross`/`tare` cover NETTED tickets only (BOTH weighings — see NETTED_SQL);
+ * the weight of the tickets still waiting for their second weighing is reported separately as
+ * pendingTare/pendingGross, never mixed into a net total.
+ */
+/** The «جمع کل» of the daily matrix — the same eight figures the screen and the Excel «جمع کل» row show. */
+type DayTotals = { tickets: number; gross: number; tare: number; net: number; netted: number; pending: number; pendingTare: number; pendingGross: number };
+router.get("/report/daily", async (req, res) => {
+  try {
+    const { condition, fromDay, toDay } = buildRecordFilters(req.query);
+    const where = condition as any;
+    const w = weighbridge_records;
+    const toNum = (v: unknown): number => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    const dayKey = sql<string>`left(coalesce(${w.weighTime}::text, ''), 10)`;
+    const goodsKey = sql<string>`coalesce(nullif(btrim(${w.goods}), ''), '—')`;
+    const complete = NETTED_SQL;
+    const rows = await db
+      .select({
+        day: dayKey,
+        goods: goodsKey,
+        tickets: sql<number>`count(*)::int`,
+        gross: sql<string>`coalesce(sum(${w.grossWeight}) filter (where ${complete}), 0)`,
+        tare: sql<string>`coalesce(sum(${w.tareWeight}) filter (where ${complete}), 0)`,
+        net: sql<string>`coalesce(sum(${w.netWeight}) filter (where ${complete}), 0)`,
+        netted: sql<number>`count(*) filter (where ${complete})::int`,
+        pending: sql<number>`count(*) filter (where not (${complete}))::int`,
+        entryTickets: sql<number>`count(*) filter (where ${w.direction} = 'entry')::int`,
+        exitTickets: sql<number>`count(*) filter (where ${w.direction} = 'exit')::int`,
+        pendingTare: sql<string>`coalesce(sum(${w.tareWeight}) filter (where not (${complete})), 0)`,
+        pendingGross: sql<string>`coalesce(sum(${w.grossWeight}) filter (where not (${complete})), 0)`,
+      })
+      .from(w)
+      .where(where)
+      .groupBy(dayKey, goodsKey)
+      .orderBy(asc(dayKey), desc(sql`coalesce(sum(${w.netWeight}) filter (where ${complete}), 0)`));
+
+    const totals = rows.reduce(
+      (acc: DayTotals, r: any) => {
+        acc.tickets += toNum(r.tickets);
+        acc.gross += toNum(r.gross);
+        acc.tare += toNum(r.tare);
+        acc.net += toNum(r.net);
+        acc.netted += toNum(r.netted);
+        acc.pending += toNum(r.pending);
+        acc.pendingTare += toNum(r.pendingTare);
+        acc.pendingGross += toNum(r.pendingGross);
+        return acc;
+      },
+      { tickets: 0, gross: 0, tare: 0, net: 0, netted: 0, pending: 0, pendingTare: 0, pendingGross: 0 }
+    );
+
+    return res.json({
+      success: true,
+      data: {
+        range: { from: fromDay, to: toDay },
+        totals: totals,
+        rows: rows.map((r: any) => ({
+          day: r.day,
+          goods: r.goods,
+          tickets: toNum(r.tickets),
+          gross: toNum(r.gross),
+          tare: toNum(r.tare),
+          net: toNum(r.net),
+          netted: toNum(r.netted),
+          pending: toNum(r.pending),
+          entryTickets: toNum(r.entryTickets),
+          exitTickets: toNum(r.exitTickets),
+          pendingTare: toNum(r.pendingTare),
+          pendingGross: toNum(r.pendingGross),
+        })),
+      },
+    });
+  } catch (error: any) {
+    console.error("[NIR WEIGHBRIDGE] daily report failed:", error?.message || error);
+    return res.status(500).json({ success: false, error: error?.message || "خطا در تهیه گزارش روزانه باسکول" });
   }
 });
 

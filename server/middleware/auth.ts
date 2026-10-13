@@ -2,7 +2,18 @@ import type { NextFunction, Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import { createDBSession, findDBSession, deleteDBSession } from '../repositories/sessionRepository';
 
-export interface AuthUser { id: string; username: string; role: string; }
+// The authenticated principal. The mobile app signs in drivers/members too, so the optional identity
+// fields below are carried in the same JWT (see server/routes/mobileAuth.ts) and are read by the
+// mobile routes; they stay optional/null for the web (factory) users.
+export interface AuthUser {
+  id: string;
+  username: string;
+  role: string;
+  fullName?: string | null;
+  driverId?: string | null;
+  farmerId?: string | null;
+  phone?: string | null;
+}
 
 declare global { namespace Express { interface Request { user?: AuthUser; sessionToken?: string; } } }
 
@@ -79,7 +90,15 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
 
     const secret = getJwtSecret();
     const payload = jwt.verify(token, secret, { algorithms: ['HS256'], issuer: 'nir-app' }) as AuthUser;
-    req.user = { id: payload.id, username: payload.username, role: payload.role };
+    req.user = {
+      id: payload.id,
+      username: payload.username,
+      role: payload.role,
+      fullName: payload.fullName || null,
+      driverId: payload.driverId || null,
+      farmerId: payload.farmerId || null,
+      phone: payload.phone || null,
+    };
     req.sessionToken = token;
     next();
   } catch {
@@ -130,14 +149,22 @@ export const requireRole = (...allowedRoles: string[]) => {
         } else {
           const secret = getJwtSecret();
           const payload = jwt.verify(token, secret, { algorithms: ['HS256'], issuer: 'nir-app' }) as AuthUser;
-          req.user = { id: payload.id, username: payload.username, role: payload.role };
+          req.user = {
+            id: payload.id,
+            username: payload.username,
+            role: payload.role,
+            fullName: payload.fullName || null,
+            driverId: payload.driverId || null,
+            farmerId: payload.farmerId || null,
+            phone: payload.phone || null,
+          };
           req.sessionToken = token;
         }
       } catch {
         return res.status(401).json({ error: 'Session expired or invalid.' });
       }
     }
-    const userRole = (req.user.role || '').toUpperCase();
+    const userRole = (req.user?.role || '').toUpperCase();
     if (userRole === 'ADMIN') return next();
     if (allowedRoles.map(r => r.toUpperCase()).includes(userRole)) return next();
     return res.status(403).json({ error: 'عدم دسترسی: شما مجوز لازم برای این عملیات را ندارید.' });

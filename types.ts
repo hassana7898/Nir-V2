@@ -269,6 +269,148 @@ export interface WeighbridgeStats extends WeighbridgeCounts {
     workerBundlePath?: string;
 }
 
+/* ------------------------------------------------------------------ reporting */
+
+/** Grand totals of a report range (گزارش‌گیری باسکول). Weights are kilograms. */
+export interface WeighbridgeReportTotals {
+    tickets: number;
+    gross: number;
+    tare: number;
+    net: number;
+    /** Average of the tickets that HAVE a net weight (a pending ticket has none). */
+    avgNet: number;
+    maxNet: number;
+    minNet: number;
+    netted: number;
+    pending: number;
+    mapped: number;
+    unmapped: number;
+    archived: number;
+    entryTickets: number;
+    exitTickets: number;
+    /** Tare of tickets still waiting for their second weighing (excluded from the sums above). */
+    pendingTare: number;
+    pendingGross: number;
+    plates: number;
+    customers: number;
+    firstDay: string | null;
+    lastDay: string | null;
+}
+
+/** One row of «جزئیات هر کالا». */
+export interface WeighbridgeReportGoodsRow {
+    goods: string;
+    tickets: number;
+    gross: number;
+    tare: number;
+    net: number;
+    avgNet: number;
+    maxNet: number;
+    minNet: number;
+    netted: number;
+    pending: number;
+    mapped: number;
+    unmapped: number;
+    archived: number;
+    pendingTare: number;
+    /** وزن پر tickets still waiting for their second weighing are holding (excluded from `gross`). */
+    pendingGross: number;
+    firstDay: string | null;
+    lastDay: string | null;
+}
+
+/** One DAY of the time series — the client buckets these into day/week/month. */
+export interface WeighbridgeReportDayRow {
+    day: string;
+    tickets: number;
+    gross: number;
+    tare: number;
+    net: number;
+    netted: number;
+    pending: number;
+    entryTickets: number;
+    exitTickets: number;
+    pendingTare: number;
+    pendingGross: number;
+}
+
+/**
+ * One «روز × کالا» line — the detail behind the daily report: on 1405/07/19 «ذرت» and «سویا» are two
+ * lines and the day's own total («جمع روز») is their sum. `net` counts netted tickets only; the weight
+ * of the tickets still waiting for their second weighing is reported separately.
+ */
+export interface WeighbridgeReportDayGoodsRow {
+    day: string;
+    goods: string;
+    tickets: number;
+    gross: number;
+    tare: number;
+    net: number;
+    netted: number;
+    pending: number;
+    pendingTare: number;
+    pendingGross: number;
+    entryTickets: number;
+    exitTickets: number;
+}
+
+export interface WeighbridgeReportDirectionRow {
+    direction: string;
+    tickets: number;
+    gross: number;
+    tare: number;
+    net: number;
+    pending: number;
+    pendingTare: number;
+}
+
+export interface WeighbridgeReportCustomerRow {
+    customer: string;
+    tickets: number;
+    gross: number;
+    tare: number;
+    net: number;
+    pending: number;
+    lastDay: string | null;
+}
+
+export interface WeighbridgeReportPlateRow {
+    plate: string;
+    tickets: number;
+    net: number;
+    pending: number;
+}
+
+export interface WeighbridgeReport {
+    range: { from: string | null; to: string | null };
+    totals: WeighbridgeReportTotals;
+    byGoods: WeighbridgeReportGoodsRow[];
+    byDay: WeighbridgeReportDayRow[];
+    byDirection: WeighbridgeReportDirectionRow[];
+    byCustomer: WeighbridgeReportCustomerRow[];
+    byPlate: WeighbridgeReportPlateRow[];
+}
+
+/**
+ * GET /api/weighbridge/report/daily — the «روز × کالا» matrix behind the printable report: one line per
+ * (day, کالا) plus server-side grand totals, computed with exactly the same filters as the list. Its own
+ * endpoint because the report tab only asks for it when the daily detail is opened or printed.
+ */
+export interface WeighbridgeDayGoodsReport {
+    range: { from: string | null; to: string | null };
+    totals: {
+        tickets: number;
+        gross: number;
+        tare: number;
+        net: number;
+        netted: number;
+        pending: number;
+        pendingTare: number;
+        pendingGross: number;
+    };
+    rows: WeighbridgeReportDayGoodsRow[];
+}
+
 export interface WeighbridgeCandidate {
     id: string;
     type: string;

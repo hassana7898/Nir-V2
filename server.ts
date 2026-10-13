@@ -31,6 +31,9 @@ import weighbridgeRouter from "./server/routes/weighbridge";
 import backupRouter from "./server/routes/backup";
 import { restoreLegacySnapshot } from "./server/services/legacyImport";
 import uploadRouter from "./server/routes/uploads";
+import mobileAuthRouter from "./server/routes/mobileAuth";
+import mobileRouter from "./server/routes/mobile";
+import mobileManagerRouter from "./server/routes/mobileManager";
 import { startBackupScheduler } from "./server/scheduler";
 
 export const app = express();
@@ -98,6 +101,12 @@ app.use("/api/sync", apiRateLimiter, requireAuth, blockViewerWrites, syncRouter)
 app.use("/api/backup", apiRateLimiter, requireAuth, blockViewerWrites, backupRouter);
 app.use("/api/uploads", apiRateLimiter, requireAuth, blockViewerWrites, uploadRouter);
 app.use("/api/weighbridge", apiRateLimiter, requireAuth, blockViewerWrites, weighbridgeRouter);
+app.use("/api/mobile/auth", authRateLimiter, mobileAuthRouter);
+app.use("/api/mobile", apiRateLimiter, mobileRouter);
+// Manager cartable (کارتابل): orders list / order status / delivery proofs. Kept in its own
+// router so the driver+farmer endpoints in mobile.ts stay untouched; paths differ (see
+// server/routes/mobileManager.ts), so mounting order is irrelevant here.
+app.use("/api/mobile/manager", apiRateLimiter, mobileManagerRouter);
 
 // ---------------------------------------------------------------- AI extraction
 let ai: GoogleGenAI | null = null;
@@ -282,6 +291,13 @@ async function startServer() {
 // Idempotent: safe to run repeatedly. Pass --wipe for a CLEAN restore (TRUNCATE the
 // business tables first; users/sessions/settings are always preserved).
 // -----------------------------------------------------------------------------
+const entryArg = (process.argv[1] || '').replace(/\\/g, '/');
+const isMain =
+  entryArg.endsWith('/server.ts') ||
+  entryArg.endsWith('/server.cjs') ||
+  entryArg.endsWith('/server.js') ||
+  entryArg.endsWith('/dist/server.cjs');
+
 if (process.argv[2] === "--restore-legacy") {
   (async () => {
     const file = process.argv[3];
@@ -299,6 +315,6 @@ if (process.argv[2] === "--restore-legacy") {
     console.error("[NIR] legacy restore failed:", err);
     process.exit(1);
   });
-} else {
+} else if (isMain) {
   startServer();
 }

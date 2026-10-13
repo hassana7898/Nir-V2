@@ -208,6 +208,23 @@ router.get('/driver/loads', requireAuth, async (req: Request, res: Response) => 
 
     const invoiceIds = invoiceList.map((i: any) => i.id);
 
+    // Phase 2: `invoices.product_name` is empty on the real rows (the office names a product on the
+    // product master, not on each waybill), so every driver load rendered as «نامشخص» even though the
+    // FK `product_id` was set. The linked product's own name is the truthful fallback.
+    const invoiceProductIds = [
+      ...new Set(invoiceList.map((i: any) => i.productId).filter(Boolean) as string[]),
+    ];
+    const productRows = invoiceProductIds.length
+      ? await db
+          .select({ id: products.id, name: products.name })
+          .from(products)
+          .where(inArray(products.id, invoiceProductIds))
+      : [];
+    const productNameById = new Map<string, string>();
+    for (const p of productRows as any[]) {
+      if (p?.id && p?.name) productNameById.set(String(p.id), String(p.name));
+    }
+
     // Fetch existing delivery proofs
     const proofs = invoiceIds.length > 0
       ? await db
@@ -252,7 +269,7 @@ router.get('/driver/loads', requireAuth, async (req: Request, res: Response) => 
         invoiceNumber: inv.invoiceNumber || inv.billNumber || '-',
         type: inv.type, // 'entry' | 'exit'
         date: inv.date,
-        productName: inv.productName || 'نامشخص',
+        productName: inv.productName || productNameById.get(String(inv.productId)) || 'نامشخص',
         sellerName: inv.sellerName || null,
         origin: inv.origin || null,
         destination: inv.farmerId ? 'مرغداری' : inv.factory || 'کارخانه آرادان',

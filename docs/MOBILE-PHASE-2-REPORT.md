@@ -326,4 +326,33 @@ MANAGER_SEED|09392893377|role=MANAGER|phone=09392893377
 2. بعد از ۱ نوامبر یک بیلد کامل بگیرید؛ کل کلاینت (۵ صفحه + تست‌ها) آماده است.
 3. در صورت تایید شما، گام بعدی: اندپوینت سرور برای «اتصال پرونده راننده» + انتخابگر کالا برای ثبت حواله.
 
+### ۹‑۸. استقرار روی dev و تایید زنده‌ی قرارداد کلاینت
+
+پس از نوشتن کلاینت، سرور هم روی dev به‌روز شد (فقط dev؛ prod دست‌نخورده):
+
+```
+.\psremoting\wb-dev-deploy.ps1        # پس از npm run build:dev
+task        : NIR Dev Service = Running
+health      : 200 {"status":"ok","service":"nir-production","database":{"status":"connected",...}}
+verify      : hashes match on C:\Servers\NIR\dev (server.cjs x2, worker, index.html)
+verify      : index.html references the freshly built index-BA1WgyNk.js
+prod        : untouched (index.html, server.cjs, .env hashes identical)  health=200
+OK          : dev deployed at 20261013-230116
+```
+
+و اسکریپت جدید و قابل‌تکرار `psremoting/dev-verify-phase2-client.ps1` روی همان دامنه‌ی dev:
+
+```
+manager: status=200 role=MANAGER exitTotal=2393
+invoice rows: checked=10 storedName=3 resolvedFromMaster=7 none=0
+kpi: inventoryItems=54 lowOrOut=12 entryKg=0 exitKg=0
+driver loads: rows=10 namedFromMaster=10 tripStatuses=assigned,at_origin
+```
+
+خواندن این اعداد: از ۱۰ حواله‌ی نمونه، ۳ ردیف نام ذخیره‌شده داشتند و **۷ ردیف نام کالا را از پرونده‌ی کالا
+گرفتند** (همان‌هایی که قبلاً «نامشخص» می‌شدند) و هیچ ردیفی بی‌نام نماند؛ ۱۰/۱۰ بار راننده هم نام واقعی کالا
+را از محصول گرفتند. `entryKg=0` و `exitKg=0` صادقانه یعنی «امروز» روی dev حواله‌ای ثبت نشده است — عدد
+نمونه‌ای جایشان نگذاشتیم.
+
+
 

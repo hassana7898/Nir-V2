@@ -5,7 +5,9 @@ import { useSettings } from '../contexts/SettingsContext';
 import { toPersianNumerals } from '../utils/formatters';
 import { showToast } from '../utils/helpers';
 import DatePicker from '../components/DatePicker';
+import WeighbridgeReportTab from '../components/WeighbridgeReport';
 import { toJalali } from '../shared/jalali';
+import { matchFarmer, matchProduct, selectableFarmers, selectableProducts } from '../shared/weighbridgeMapping';
 import * as dataService from '../services/dataService';
 import { WeighbridgeCounts, WeighbridgeRecord, WeighbridgeStats } from '../types';
 
@@ -127,6 +129,8 @@ const WeighbridgePage: React.FC = () => {
     const [offset, setOffset] = useState(0);
     const [loading, setLoading] = useState(false);
     const [syncing, setSyncing] = useState(false);
+    /** «قبوض باسکول» (the ticket list) or «گزارش‌گیری» (the aggregated report tab). */
+    const [tab, setTab] = useState<'list' | 'report'>('list');
 
     const [from, setFrom] = useState<Date | null>(null);
     const [to, setTo] = useState<Date | null>(null);
@@ -149,37 +153,56 @@ const WeighbridgePage: React.FC = () => {
         }
     }, []);
 
+    /** The farmer picker: soft-deleted rows dropped and sorted (the ticket's customer matches this list). */
+    const farmerOptions = useMemo(() => selectableFarmers(farmers), [farmers]);
+
+    /**
+     * The product picker mirrors Settings — every non-deleted product, one option per name — with the
+     * invoice type's own products FIRST. Nothing is hidden: a «خروج» can still sell a raw material,
+     * and a renamed product no longer appears twice (its soft-deleted twin is filtered out).
+     */
+    const productOptions = useMemo(
+        () => selectableProducts(settings.products, mapType === 'entry' ? 'rawMaterial' : 'finishedGood'),
+        [settings.products, mapType]
+    );
+
     /** Sensible default product for the invoice type (first raw material / first finished good). */
     const defaultProduct = useCallback(
         (type: 'entry' | 'exit') => {
-            const list = settings.products || [];
             const wanted = type === 'entry' ? 'rawMaterial' : 'finishedGood';
+            const list = selectableProducts(settings.products, wanted);
             const match = list.find((p: any) => p.type === wanted) || list[0];
             return { id: match ? match.id : '', name: match ? match.name : '' };
         },
         [settings.products]
     );
 
-    /** Every field pre-filled from the ticket so the operator only reviews/edits. */
+    /**
+     * Every field pre-filled from the ticket so the operator only reviews/edits.
+     *
+     * The product and the person come straight from the ticket: «نوع کالا» is matched by name
+     * (exact -> containment -> typo, see shared/weighbridgeMapping) and «نام مشتری» is matched to a
+     * farmer. That customer is the مرغدار on an exit and the فروشنده on an entry; when nobody in the
+     * farmer list fits, the ticket's own spelling is kept as text so it is never lost.
+     */
     const prefillForm = useCallback(
         (record: WeighbridgeRecord, type: 'entry' | 'exit') => {
             const raw: any = (record as any).rawPayload || {};
             const goods = String((record as any).goods || raw.Goods || '').trim();
+            const customer = String((record as any).customerName || raw.CustomerName || '').trim();
             const remittanceNo = String((record as any).remittanceNumber || raw.ShomareHavale || record.ticketNumber || '').trim();
-            // Auto-match the ticket's «نوع کالا» (Goods) to a product by name (case-insensitive,
-            // trimmed). On a match it is pre-selected; on no match the product is left unselected.
-            let product: { id: string; name: string } = { id: '', name: '' };
-            if (goods) {
-                const key = goods.toLowerCase();
-                const list: any[] = settings.products || [];
-                const wantedType = type === 'entry' ? 'rawMaterial' : 'finishedGood';
-                const match =
-                    list.find((p: any) => p.type === wantedType && String(p.name || '').trim().toLowerCase() === key) ||
-                    list.find((p: any) => String(p.name || '').trim().toLowerCase() === key);
-                if (match) product = { id: match.id, name: match.name };
-            } else {
-                product = defaultProduct(type);
-            }
+
+            // The ticket's «نوع کالا» wins; the invoice type's own products are tried first, then all.
+            const wantedType = type === 'entry' ? 'rawMaterial' : 'finishedGood';
+            const matched = goods ? matchProduct(goods, settings.products, wantedType) : null;
+            const product = matched
+                ? { id: matched.id, name: matched.name }
+                : goods
+                    ? { id: '', name: '' } // an unknown کالا is left to the operator — never guessed
+                    : defaultProduct(type);
+
+            const farmer = customer ? matchFarmer(customer, farmers) : null;
+            const sellerName = type === 'entry' ? customer : '';
             return {
                 date: jalaliDayOf(record.weighTime),
                 dateObj: dateObjOf(record.weighTime),
@@ -189,20 +212,20 @@ const WeighbridgePage: React.FC = () => {
                 driverName: record.driverName || '',
                 driverPhone: '',
                 driverIBAN: '',
-                farmerId: '',
-                farmerName: '',
+                farmerId: farmer ? farmer.id : '',
+                farmerName: farmer ? farmer.name : type === 'exit' ? customer : '',
                 invoiceNumber: remittanceNo,
                 billNumber: type === 'entry' ? remittanceNo : String(raw.BillOfLading || ''),
                 billWeight: '',
                 origin: '',
-                sellerName: '',
+                sellerName,
                 transportCost: '',
                 productVariant: goods,
                 // No automatic note: only what the operator types is stored on the invoice.
                 notes: '',
             };
         },
-        [defaultProduct, settings.products]
+        [defaultProduct, farmers, settings.products]
     );
 
     const load = useCallback(async () => {
@@ -460,6 +483,26 @@ const WeighbridgePage: React.FC = () => {
 
     return (
         <div className="space-y-4">
+            <div className="flex rounded-lg overflow-hidden border border-slate-300 w-fit bg-white shadow-sm">
+                <button
+                    type="button"
+                    onClick={() => setTab('list')}
+                    className={`px-4 py-2 text-xs font-bold ${tab === 'list' ? 'bg-sky-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}
+                >
+                    قبوض باسکول
+                </button>
+                <button
+                    type="button"
+                    onClick={() => setTab('report')}
+                    className={`px-4 py-2 text-xs font-bold ${tab === 'report' ? 'bg-sky-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}
+                >
+                    گزارش‌گیری
+                </button>
+            </div>
+
+            {tab === 'report' && <WeighbridgeReportTab />}
+
+            <div className={tab === 'report' ? 'hidden' : 'space-y-4'}>
             <div className="bg-white rounded-xl shadow-sm p-4 flex flex-wrap items-center justify-between gap-3">
                 <div>
                     <h1 className="text-xl font-bold text-slate-800">مدیریت باسکول</h1>
@@ -761,18 +804,30 @@ const WeighbridgePage: React.FC = () => {
                                         <select
                                             value={form.productId || ''}
                                             onChange={(e) => {
-                                                const p = (settings.products || []).find((x: any) => x.id === e.target.value);
+                                                const p = productOptions.find((x: any) => x.id === e.target.value);
                                                 setField('productId', e.target.value);
                                                 setField('productName', p ? p.name : '');
                                             }}
                                             className="w-full border border-slate-300 rounded-lg px-3 py-2 bg-white"
                                         >
                                             <option value="">— انتخاب محصول —</option>
-                                            {(settings.products || [])
-                                                .filter((p: any) => (mapType === 'entry' ? p.type === 'rawMaterial' : p.type === 'finishedGood'))
-                                                .map((p: any) => (
+                                            <optgroup label={mapType === 'entry' ? 'ماده اولیه (پیشنهاد ورود)' : 'مواد اولیه'}>
+                                                {productOptions.filter((p: any) => p.type === 'rawMaterial').map((p: any) => (
                                                     <option key={p.id} value={p.id}>{p.name}</option>
                                                 ))}
+                                            </optgroup>
+                                            <optgroup label={mapType === 'entry' ? 'محصول نهایی' : 'محصولات نهایی (محصول فروش)'}>
+                                                {productOptions.filter((p: any) => p.type === 'finishedGood').map((p: any) => (
+                                                    <option key={p.id} value={p.id}>{p.name}</option>
+                                                ))}
+                                            </optgroup>
+                                            {productOptions.some((p: any) => p.type !== 'rawMaterial' && p.type !== 'finishedGood') && (
+                                                <optgroup label="سایر">
+                                                    {productOptions.filter((p: any) => p.type !== 'rawMaterial' && p.type !== 'finishedGood').map((p: any) => (
+                                                        <option key={p.id} value={p.id}>{p.name}</option>
+                                                    ))}
+                                                </optgroup>
+                                            )}
                                         </select>
                                         {String(form.productVariant || '').trim() ? (
                                             <span className="block mt-1 text-[10px] text-slate-500">
@@ -804,7 +859,7 @@ const WeighbridgePage: React.FC = () => {
                                                     className="w-full border border-slate-300 rounded-lg px-3 py-2 bg-white"
                                                 >
                                                     <option value="">— انتخاب مرغدار —</option>
-                                                    {farmers.map((f: any) => (
+                                                    {farmerOptions.map((f: any) => (
                                                         <option key={f.id} value={f.id}>{f.name}</option>
                                                     ))}
                                                 </select>
@@ -883,6 +938,7 @@ const WeighbridgePage: React.FC = () => {
 
 
 
+            </div>
         </div>
     );
 };

@@ -1,8 +1,16 @@
 
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { Farmer, Brood, Exit, ExceptionalFeed } from '../types';
 import { useSettings } from '../contexts/SettingsContext';
 import { useAuth } from '../contexts/AuthContext';
+import {
+    buildProductAliasMap,
+    canonicalProductId,
+    canonicalProductRows,
+    isSameProduct,
+    numericByCanonical,
+    phaseDurationByCanonical,
+} from '../shared/productIdentity';
 import { toPersianNumerals, formatDate, formatToISODate } from '../utils/formatters';
 import * as dataService from '../services/dataService';
 import { handlePrint } from '../utils/print';
@@ -34,6 +42,28 @@ const BroodDetailsCard: React.FC<BroodDetailsCardProps> = ({ farmer, brood, allE
     const { settings, productMap } = useSettings();
     const { isViewer } = useAuth();
     const quotaMap = useMemo(() => new Map(settings.feedQuotas?.map(q => [q.productId, q.quotaPerChick])), [settings.feedQuotas]);
+
+    /**
+     * ONE product often exists under several ids — renaming it in Settings soft-deletes the old row
+     * and pushes a new `prod_<timestamp>` one, and the legacy import created slug ids (`پس_دان_یک`) —
+     * while ALL of them display the same name. Grouping by the raw `productId` therefore rendered the
+     * same product two or three times in «جزئیات سهمیه و ارسال» (the reported bug: «پس دان یک» twice).
+     * Everything below groups by the CANONICAL id, so a product appears once and its quota/weights are
+     * merged instead of split. See shared/productIdentity for the production evidence.
+     */
+    const productAlias = useMemo(() => buildProductAliasMap(settings.products), [settings.products]);
+    const productRows = useMemo(() => canonicalProductRows(settings.products, productAlias), [settings.products, productAlias]);
+    const canonical = useCallback((id: string) => canonicalProductId(productAlias, id), [productAlias]);
+    const sameProduct = useCallback((a: string, b: string) => isSameProduct(productAlias, a, b), [productAlias]);
+    /** Quotas / phase lengths may be defined on ANY twin, so they are merged onto the canonical id. */
+    const quotaByCanonical = useMemo(
+        () => numericByCanonical((settings.feedQuotas || []).map(q => ({ productId: q.productId, value: q.quotaPerChick })), productAlias, 'sum'),
+        [settings.feedQuotas, productAlias]
+    );
+    const durationByCanonical = useMemo(
+        () => phaseDurationByCanonical(settings.productPhaseDurations, settings.products, productAlias),
+        [settings.productPhaseDurations, settings.products, productAlias]
+    );
 
     // State for Edit Brood Modal
     const [isEditModalOpen, setIsEditModalOpen] = useState(false);
@@ -91,9 +121,10 @@ const BroodDetailsCard: React.FC<BroodDetailsCardProps> = ({ farmer, brood, allE
 
 
     const calculatedData = useMemo(() => {
-        // all finished goods ever, so we dont lose past exit weights
+        // all finished goods ever, so we dont lose past exit weights (canonical rows only: the same
+        // product under a renamed/legacy id must not be counted twice)
         const finishedGoodProductIds = new Set(
-            settings.products.filter(p => p.type === "finishedGood").map(p => p.id)
+            productRows.filter(p => p.type === "finishedGood").map(p => p.id)
         );
 
         const sent = new Map<string, number>();
@@ -148,11 +179,11 @@ const BroodDetailsCard: React.FC<BroodDetailsCardProps> = ({ farmer, brood, allE
         finalInvoices.sort((a,b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
         finalInvoices.forEach(exit => {
-            sent.set(exit.productId, (sent.get(exit.productId) || 0) + safeParseFloat(exit.weight));
+            sent.set(canonical(exit.productId), (sent.get(canonical(exit.productId)) || 0) + safeParseFloat(exit.weight));
         });
             
         (brood.exceptionalFeed || []).forEach(feed => {
-             sent.set(feed.productId, (sent.get(feed.productId) || 0) + safeParseFloat(feed.weight));
+             sent.set(canonical(feed.productId), (sent.get(canonical(feed.productId)) || 0) + safeParseFloat(feed.weight));
         });
         
         let totalFeedWeight = 0;
@@ -163,16 +194,16 @@ const BroodDetailsCard: React.FC<BroodDetailsCardProps> = ({ farmer, brood, allE
         });
 
         let calculatedTotalQuota = 0;
-        settings.products
+        productRows
             .filter(p => {
                 if (p.type !== "finishedGood") return false;
                 if (brood.activeProductsAtCreation) {
-                    return brood.activeProductsAtCreation.includes(p.id);
+                    return brood.activeProductsAtCreation.some(id => sameProduct(id, p.id));
                 }
                 return !p.isDeleted;
             })
             .forEach(product => {
-                calculatedTotalQuota += (quotaMap.get(product.id) || 0) * brood.chickCount / 1000;
+                calculatedTotalQuota += (quotaByCanonical.get(product.id) || 0) * brood.chickCount / 1000;
             });
 
         // Metrics: Use setHours(0,0,0,0) to normalize dates for difference calculation
@@ -199,7 +230,7 @@ const BroodDetailsCard: React.FC<BroodDetailsCardProps> = ({ farmer, brood, allE
             perCapitaConsumption,
             conversionRate
         };
-    }, [farmer.id, brood, allExits, settings.products, quotaMap]);
+    }, [farmer.id, brood, allExits, settings.products, quotaMap, productRows, canonical, sameProduct, quotaByCanonical]);
 
     const { sentData, totalSentWeight, relevantInvoices, totalQuota, daysOfBrood, perCapitaConsumption, conversionRate } = calculatedData;
 
@@ -436,8 +467,10 @@ const BroodDetailsCard: React.FC<BroodDetailsCardProps> = ({ farmer, brood, allE
 
     // --- Phase Logic Calculation ---
     const getProductPhaseInfo = (currentProductId: string, productQuota: number, sentAmount: number) => {
-        const getPhaseDuration = (prodId: string) => settings.productPhaseDurations?.[prodId] || 10;
-        const finishedGoods = settings.products.filter(p => p.type === 'finishedGood');
+        const getPhaseDuration = (prodId: string) => durationByCanonical.get(prodId) || 10;
+        // canonical rows only: the renamed/legacy twins of one product would otherwise shift the day
+        // range of every later phase
+        const finishedGoods = productRows.filter(p => p.type === 'finishedGood');
         
         let startDay = 1;
         let endDay = 0;
@@ -813,25 +846,25 @@ const BroodDetailsCard: React.FC<BroodDetailsCardProps> = ({ farmer, brood, allE
                         <span className="text-xs font-normal text-slate-400 mr-2">(برای مشاهده جزئیات روی هر محصول کلیک کنید)</span>
                     </h5>
                     <div className="grid grid-cols-1 gap-3">
-                        {settings.products.filter(p => { if (p.type !== "finishedGood") return false; if ((sentData.get(p.id) || 0) > 0) return true; if (brood.activeProductsAtCreation) return brood.activeProductsAtCreation.includes(p.id); return !p.isDeleted; }).map((product, index) => {
-                            const quota = (quotaMap.get(product.id) || 0) * brood.chickCount / 1000;
+                        {productRows.filter(p => { if (p.type !== "finishedGood") return false; if ((sentData.get(p.id) || 0) > 0) return true; if (brood.activeProductsAtCreation) return brood.activeProductsAtCreation.some(id => sameProduct(id, p.id)); return !p.isDeleted; }).map((product, index) => {
+                            const quota = (quotaByCanonical.get(product.id) || 0) * brood.chickCount / 1000;
                             const sent = sentData.get(product.id) || 0;
                             const remaining = quota - sent;
                             const percent = quota > 0 ? (sent / quota) * 100 : 0;
 
                             const lastExit = relevantInvoices
-                                .filter(inv => inv.productId === product.id)
+                                .filter(inv => sameProduct(inv.productId, product.id))
                                 .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0];
                             
                             const isExpanded = expandedProductId === product.id;
 
                             // Filter invoices and manual feed for this product
                             const productInvoices = relevantInvoices
-                                .filter(inv => inv.productId === product.id)
+                                .filter(inv => sameProduct(inv.productId, product.id))
                                 .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
                             
                             const productManualFeeds = (brood.exceptionalFeed || []).map((feed, idx) => ({ ...feed, originalIndex: idx }))
-                                .filter(feed => feed.productId === product.id)
+                                .filter(feed => sameProduct(feed.productId, product.id))
                                 .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
                             // Phase Logic Calculation

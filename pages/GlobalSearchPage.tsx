@@ -4,6 +4,7 @@ import { Remittance, Entry, Exit, Farmer } from '../types';
 import * as dataService from '../services/dataService';
 import { useSettings } from '../contexts/SettingsContext';
 import { toPersianNumerals, formatDate } from '../utils/formatters';
+import { setTargetDate } from '../shared/targetDate';
 import { useNavigate } from 'react-router-dom';
 
 const GlobalSearchPage: React.FC = () => {
@@ -46,8 +47,13 @@ const GlobalSearchPage: React.FC = () => {
         setLoading(false);
     }, [debouncedQuery, searchType]);
 
+    /**
+     * Open the result's own day. The day is only STORED here (never read back): the Entry/Exit page
+     * peeks at it when it mounts and clears it once applied — see shared/targetDate for why the
+     * read/remove must not happen inside that page's state initializer.
+     */
     const goToDate = (date: string, type: 'entry' | 'exit') => {
-        sessionStorage.setItem('targetDate', date);
+        setTargetDate(date);
         navigate(`/${type}`);
     };
 

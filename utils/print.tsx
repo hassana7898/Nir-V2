@@ -34,6 +34,7 @@ import { createRoot } from 'react-dom/client';
 import { Remittance, Settings, Entry, Exit, Farmer, Brood } from '../types';
 import { toPersianNumerals, formatDate, formatCurrency, formatWastage, formatIBANForDisplay, formatDateWithWeekday } from './formatters';
 import { loadSettings, getFarmers } from '../services/dataService';
+import { groupGoodsByDay, pendingWeightOf, type DayGoodsGroup } from '../shared/weighbridgeReport';
 
 type EntryTotals = {
     byProduct: Map<string, { count: number; billWeight: number; scaleWeight: number; transportCost: number }>;
@@ -606,6 +607,148 @@ const PrintReportLayout: React.FC<{ data: Remittance[] | GroupedResults; options
 };
 
 
+/**
+ * گزارش روزانهٔ باسکول — the printable daily report (چاپ گزارش).
+ *
+ * `data` is the raw «روز × کالا» rows of /api/weighbridge/report/daily (same filters as the screen);
+ * `groupGoodsByDay` buckets them per day and computes each «جمع روز» from the SAME rows that are
+ * printed underneath, so a day's total can never drift from its own lines. Every weight here is a
+ * NETTED (both-weighings) figure; the kilos still waiting for a second weighing get their own column
+ * and are never added to a net total.
+ */
+const PrintWeighbridgeReportLayout: React.FC<{ data: any[]; options: PrintOptions }> = ({ data, options }) => {
+    const settings = loadSettings();
+    const groups = useMemo<DayGoodsGroup[]>(() => groupGoodsByDay(data as any), [data]);
+    const grand = useMemo(
+        () =>
+            groups.reduce(
+                (acc, day) => ({
+                    tickets: acc.tickets + day.tickets,
+                    gross: acc.gross + day.gross,
+                    tare: acc.tare + day.tare,
+                    net: acc.net + day.net,
+                    netted: acc.netted + day.netted,
+                    pending: acc.pending + day.pending,
+                    pendingWeight: acc.pendingWeight + day.pendingWeight,
+                }),
+                { tickets: 0, gross: 0, tare: 0, net: 0, netted: 0, pending: 0, pendingWeight: 0 }
+            ),
+        [groups]
+    );
+    const kg = (value: number) => toPersianNumerals(Math.round(value || 0).toLocaleString('fa-IR'));
+    const count = (value: number) => toPersianNumerals(Math.round(value || 0).toLocaleString('fa-IR'));
+    const from = options.startDate ? formatDate(options.startDate) : '—';
+    const to = options.endDate ? formatDate(options.endDate) : '—';
+    const stamp = new Date().toLocaleString('fa-IR');
+
+    return (
+        <div className="print-page">
+            <div className="flex justify-between items-center mb-2 border-b-2 pb-2 border-slate-800 print-header">
+                <div className="w-1/4">{settings.factoryLogo ? <img src={settings.factoryLogo} alt="Logo" className="h-10 max-w-[120px] object-contain" /> : <span></span>}</div>
+                <div className="w-1/2 text-center">
+                    <h2 className="text-lg font-bold">{options.customPrintTitle || 'گزارش روزانهٔ باسکول'}</h2>
+                    <h3 className="text-base font-semibold">{settings.factoryName}</h3>
+                    <p className="text-xs text-slate-600">تفکیک روزانه به تفکیک کالا همراه با جمع روز</p>
+                </div>
+                <div className="w-1/4 text-left">
+                    <p className="text-sm font-semibold">از: <span>{from}</span></p>
+                    <p className="text-sm font-semibold">تا: <span>{to}</span></p>
+                </div>
+            </div>
+
+            <div className="print-summary my-3 p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs grid grid-cols-4 gap-2">
+                <div><strong>تعداد کل قبض:</strong> {count(grand.tickets)}</div>
+                <div><strong>قبض خالص‌شده:</strong> {count(grand.netted)}</div>
+                <div><strong>در انتظار توزین دوم:</strong> {count(grand.pending)}</div>
+                <div><strong>جمع وزن خالص:</strong> {kg(grand.net)} کیلوگرم</div>
+                <div><strong>جمع وزن پر:</strong> {kg(grand.gross)} کیلوگرم</div>
+                <div><strong>جمع وزن تار:</strong> {kg(grand.tare)} کیلوگرم</div>
+                <div><strong>وزن در انتظار توزین دوم:</strong> {kg(grand.pendingWeight)} کیلوگرم</div>
+                <div><strong>تعداد روز:</strong> {count(groups.length)}</div>
+            </div>
+
+            {groups.length === 0 && (
+                <p className="text-center text-sm text-slate-500 py-8">در این بازه با این فیلترها قبضی ثبت نشده است.</p>
+            )}
+
+            {groups.map((day) => (
+                <div key={day.day || 'unknown'} className="mb-4" style={{ pageBreakInside: 'avoid' }}>
+                    <table className="w-full border-collapse text-xs">
+                        <thead>
+                            <tr className="bg-slate-200">
+                                <th className="p-1 border border-slate-400 text-right" colSpan={8}>
+                                    روز {day.label}{day.day ? ` (${day.day})` : ''}
+                                </th>
+                            </tr>
+                            <tr className="bg-slate-100">
+                                <th className="p-1 border border-slate-400 text-right" style={{ width: '26%' }}>کالا</th>
+                                <th className="p-1 border border-slate-400">تعداد قبض</th>
+                                <th className="p-1 border border-slate-400">وزن پر</th>
+                                <th className="p-1 border border-slate-400">وزن تار</th>
+                                <th className="p-1 border border-slate-400">وزن خالص</th>
+                                <th className="p-1 border border-slate-400">خالص‌شده</th>
+                                <th className="p-1 border border-slate-400">در انتظار</th>
+                                <th className="p-1 border border-slate-400">وزن در انتظار</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {day.goods.map((line) => (
+                                <tr key={`${day.day}-${line.goods}`}>
+                                    <td className="p-1 border border-slate-300 text-right font-semibold">{line.goods}</td>
+                                    <td className="p-1 border border-slate-300 text-center">{count(line.tickets)}</td>
+                                    <td className="p-1 border border-slate-300 text-center">{kg(line.gross)}</td>
+                                    <td className="p-1 border border-slate-300 text-center">{kg(line.tare)}</td>
+                                    <td className="p-1 border border-slate-300 text-center font-bold">{kg(line.net)}</td>
+                                    <td className="p-1 border border-slate-300 text-center">{count(line.netted)}</td>
+                                    <td className="p-1 border border-slate-300 text-center text-red-700">{count(line.pending)}</td>
+                                    <td className="p-1 border border-slate-300 text-center text-red-700">{kg(pendingWeightOf(line.pendingTare, line.pendingGross))}</td>
+                                </tr>
+                            ))}
+                            <tr className="bg-slate-100 font-bold">
+                                <td className="p-1 border border-slate-400 text-right">جمع روز {day.label}</td>
+                                <td className="p-1 border border-slate-400 text-center">{count(day.tickets)}</td>
+                                <td className="p-1 border border-slate-400 text-center">{kg(day.gross)}</td>
+                                <td className="p-1 border border-slate-400 text-center">{kg(day.tare)}</td>
+                                <td className="p-1 border border-slate-400 text-center">{kg(day.net)}</td>
+                                <td className="p-1 border border-slate-400 text-center">{count(day.netted)}</td>
+                                <td className="p-1 border border-slate-400 text-center">{count(day.pending)}</td>
+                                <td className="p-1 border border-slate-400 text-center">{kg(day.pendingWeight)}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            ))}
+
+            {groups.length > 1 && (
+                <table className="w-full border-collapse text-xs" style={{ pageBreakInside: 'avoid' }}>
+                    <tbody>
+                        <tr className="bg-slate-300 font-bold">
+                            <td className="p-1 border border-slate-500 text-right" style={{ width: '26%' }}>جمع کل بازه — {from} تا {to}</td>
+                            <td className="p-1 border border-slate-500 text-center">{count(grand.tickets)}</td>
+                            <td className="p-1 border border-slate-500 text-center">{kg(grand.gross)}</td>
+                            <td className="p-1 border border-slate-500 text-center">{kg(grand.tare)}</td>
+                            <td className="p-1 border border-slate-500 text-center">{kg(grand.net)}</td>
+                            <td className="p-1 border border-slate-500 text-center">{count(grand.netted)}</td>
+                            <td className="p-1 border border-slate-500 text-center">{count(grand.pending)}</td>
+                            <td className="p-1 border border-slate-500 text-center">{kg(grand.pendingWeight)}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            )}
+
+            <div className="mt-3 text-[10px] text-slate-600 leading-5">
+                <p>
+                    «وزن خالص» فقط برای قبض‌هایی محاسبه می‌شود که <b>هر دو توزین</b> آن‌ها ثبت شده باشد (وزن پر و وزن تار هر دو موجود
+                    باشد)؛ قبض‌های «در انتظار توزین دوم» در ستون‌های «در انتظار» و «وزن در انتظار» نشان داده می‌شوند و در جمع وزن خالص
+                    لحاظ نمی‌شوند.
+                </p>
+                {options.generalDescription ? <p>{options.generalDescription}</p> : null}
+                <p>تاریخ چاپ: {stamp}</p>
+            </div>
+        </div>
+    );
+};
+
 let printRootInstance: ReturnType<typeof createRoot> | null = null;
 let printTimer: ReturnType<typeof setTimeout> | null = null;
 let afterprintArmed = false;
@@ -623,7 +766,7 @@ if (!afterprintArmed) { window.addEventListener('afterprint', onAfterPrint); aft
 
 type PrintOptions = { pageSettings?: { title?: string, description?: string }[]; printDate?: Date; startDate?: Date; endDate?: Date; reportSummary?: any; groupBy?: string; farmer?: Farmer; brood?: Brood; generalDescription?: string; customPrintTitle?: string; showPageTotals?: boolean; showGrandTotal?: boolean; };
 
-export const handlePrint = (type: 'entry' | 'exit' | 'analysis' | 'report' | 'brood', data: any, options: PrintOptions) => {
+export const handlePrint = (type: 'entry' | 'exit' | 'analysis' | 'report' | 'brood' | 'weighbridge', data: any, options: PrintOptions) => {
     const printRoot = document.getElementById('print-root');
     if (!printRoot) return;
     performCleanup();
@@ -633,6 +776,9 @@ export const handlePrint = (type: 'entry' | 'exit' | 'analysis' | 'report' | 'br
     style.id = 'custom-print-style';
     if (type === 'brood') {
         style.innerHTML = `@page { size: A4 landscape; margin: 1cm; } @media print { body { -webkit-print-color-adjust: exact; } .dir-ltr { direction: ltr; } }`;
+    } else if (type === 'weighbridge') {
+        // A day×goods table has few, narrow columns: portrait A4 keeps every day on one page.
+        style.innerHTML = `@page { size: A4 portrait; margin: 1cm; } @media print { body { -webkit-print-color-adjust: exact; } }`;
     } else {
         style.innerHTML = `@page { size: A4 landscape; }`;
     }
@@ -642,6 +788,7 @@ export const handlePrint = (type: 'entry' | 'exit' | 'analysis' | 'report' | 'br
     else if (type === 'analysis') componentToRender = <PrintAnalysisLayout data={data} dates={options as { startDate: Date, endDate: Date }} />;
     else if (type === 'report') componentToRender = <PrintReportLayout data={data} options={options as any} />;
     else if (type === 'brood') componentToRender = <PrintBroodLayout farmer={options.farmer!} brood={options.brood!} data={data} />;
+    else if (type === 'weighbridge') componentToRender = <PrintWeighbridgeReportLayout data={data} options={options} />;
 
     if (!componentToRender) return;
     printRootInstance = createRoot(printRoot);

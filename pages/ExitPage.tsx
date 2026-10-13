@@ -14,21 +14,19 @@ import Sortable from 'sortablejs';
 import DataImportModal from '../components/DataImportModal';
 import ImageImportModal from '../components/ImageImportModal';
 import { useAuth } from '../contexts/AuthContext';
+import { clearTargetDate, dateFromIsoDay, peekTargetDate } from '../shared/targetDate';
 
 type SortableKeys = keyof Exit | 'farmerId' | 'productId';
 type SortConfigItem = { key: SortableKeys; direction: 'asc' | 'desc' };
 
 const ExitPage: React.FC = () => {
     const { isViewer } = useAuth();
-    const [currentDate, setCurrentDate] = useState(() => {
-        const saved = sessionStorage.getItem('targetDate');
-        if (saved) {
-            sessionStorage.removeItem('targetDate');
-            const [y, m, d] = saved.split('-').map(Number);
-            return new Date(y, m - 1, d, 12, 0, 0);
-        }
-        return new Date();
-    });
+    // The day this page opens on. A day requested by «مشاهده روز» in the global search is only
+    // PEEKED here — never removed — because a state initializer must stay pure: the deployed
+    // bundle runs React in development mode, so StrictMode invokes it twice and a removal here
+    // silently lost the value, sending the user to today instead. The effect below applies it and
+    // then clears the key.
+    const [currentDate, setCurrentDate] = useState(() => dateFromIsoDay(peekTargetDate()) ?? new Date());
     const [exits, setExits] = useState<Exit[]>([]);
     const [farmers, setFarmers] = useState<Farmer[]>([]);
     const [searchTerm, setSearchTerm] = useState('');
@@ -89,6 +87,16 @@ const ExitPage: React.FC = () => {
         window.addEventListener(dataService.ORDER_SYNCED_EVENT, onOrderSynced);
         return () => window.removeEventListener(dataService.ORDER_SYNCED_EVENT, onOrderSynced);
     }, [fetchExits]);
+
+    // «مشاهده روز» from the global search: open the day the user asked for. peekTargetDate() is
+    // repeatable (it never consumes), so running this effect more than once — which StrictMode
+    // does — is harmless; clearTargetDate() is idempotent and runs only after the day is applied.
+    useEffect(() => {
+        const pending = dateFromIsoDay(peekTargetDate());
+        if (!pending) return;
+        setCurrentDate(pending);
+        clearTargetDate();
+    }, []);
     
     useEffect(() => {
         const timerId = setTimeout(() => { setDebouncedSearchTerm(searchTerm); }, 300);

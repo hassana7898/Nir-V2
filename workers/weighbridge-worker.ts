@@ -499,10 +499,25 @@ const main = async () => {
       const gross = map.grossWeight ? toWeight(row[map.grossWeight]) : null;
       const tare = map.tareWeight ? toWeight(row[map.tareWeight]) : null;
       let net = map.netWeight ? toWeight(row[map.netWeight]) : null;
-      // Vendor rows keep NetWeight at 0 until the operator closes the ticket, and a loaded truck is
-      // never 0 kg: a falsy net with both weights present is recomputed as gross - tare.
-      if ((net === null || net === 0) && gross !== null && tare !== null && gross !== tare) {
-        net = Math.round((gross - tare) * 1000) / 1000;
+      // «خالص‌شده» needs BOTH weighings — mirror of the server's NETTED_SQL.
+      //
+      // WHY: the weighing software opens a ticket at the FIRST weighing and leaves the other column at 0
+      // (`وزن پر` filled ⇒ «وزن خالی» = 0, and vice versa). The old code recomputed a missing net as
+      // `gross - 0` = the gross, so a truck that had been weighed only once was stored with a full load
+      // as «وزن خالص» (26,360 kg for ticket 3593) and looked netted everywhere. Now:
+      //   * both weights present ⇒ the net is recomputed when the vendor left it 0 (a loaded truck is
+      //     never 0 kg), so a late NetWeight column never hides a completed ticket;
+      //   * a weighing missing ⇒ the net stays UNKNOWN (null, never `gross - 0`), so the ticket is
+      //     correctly counted as «در انتظار توزین دوم» instead of inventing a weight;
+      //   * a positive vendor net with a weighing missing is kept (the software knows better than we do),
+      //     and the report's both-weighings rule still shows the ticket as pending.
+      const bothWeights = gross !== null && gross > 0 && tare !== null && tare > 0;
+      if (bothWeights) {
+        if ((net === null || net === 0) && gross !== tare) {
+          net = Math.round((gross - tare) * 1000) / 1000;
+        }
+      } else if (net === null || net <= 0) {
+        net = null;
       }
 
       const payload = {

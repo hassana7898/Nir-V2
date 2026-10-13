@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../hooks/useAuth';
+import { extractApiErrorMessage } from '../../api/errors';
 import { toPersianDigits } from '../../utils/formatters';
 
 export function OtpVerifyScreen({ route, navigation }: any) {
@@ -48,9 +49,7 @@ export function OtpVerifyScreen({ route, navigation }: any) {
       await verifyOtp(phone, code);
       // Navigation is handled reactively by RootNavigator when isAuthenticated becomes true
     } catch (err: any) {
-      setErrorMsg(
-        err.response?.data?.message || err.message || 'کد وارد شده نامعتبر یا منقضی است'
-      );
+      setErrorMsg(extractApiErrorMessage(err, 'کد وارد شده نامعتبر یا منقضی است'));
     } finally {
       setLoading(false);
     }
@@ -66,7 +65,7 @@ export function OtpVerifyScreen({ route, navigation }: any) {
         setCode(res.debugCode);
       }
     } catch (err: any) {
-      setErrorMsg('ارسال مجدد پیامک ناموفق بود.');
+      setErrorMsg(extractApiErrorMessage(err, 'ارسال مجدد پیامک ناموفق بود.'));
     } finally {
       setResending(false);
     }

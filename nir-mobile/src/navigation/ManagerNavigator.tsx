@@ -9,6 +9,7 @@ import { InventoryMonitorScreen } from '../screens/manager/InventoryMonitorScree
 import { MoreMenuScreen } from '../screens/manager/MoreMenuScreen';
 import { FarmersDirectoryScreen } from '../screens/manager/FarmersDirectoryScreen';
 import { ApprovalsScreen } from '../screens/manager/ApprovalsScreen';
+import { UnmatchedDriversScreen } from '../screens/manager/UnmatchedDriversScreen';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -79,6 +80,7 @@ export function ManagerNavigator() {
       <Stack.Screen name="ManagerTabsRoot" component={ManagerTabs} />
       <Stack.Screen name="FarmersDirectory" component={FarmersDirectoryScreen} />
       <Stack.Screen name="Approvals" component={ApprovalsScreen} />
+      <Stack.Screen name="UnmatchedDrivers" component={UnmatchedDriversScreen} />
     </Stack.Navigator>
   );
 }

@@ -8,7 +8,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
-    "test": "tsx tests/mobileInfra.test.ts && tsx tests/networkAndOffline.test.ts && tsx tests/authFlow.test.ts && tsx tests/navigationFlow.test.ts && tsx tests/driverOfflineProof.test.ts && tsx tests/farmerDiscrepancy.test.ts && tsx tests/notifications.test.ts && tsx tests/offlineDemo.test.ts"
+    "test": "tsx tests/mobileInfra.test.ts && tsx tests/networkAndOffline.test.ts && tsx tests/authFlow.test.ts && tsx tests/navigationFlow.test.ts && tsx tests/driverOfflineProof.test.ts && tsx tests/farmerDiscrepancy.test.ts && tsx tests/notifications.test.ts && tsx tests/environmentGuard.test.ts && tsx tests/podContract.test.ts && tsx tests/noMockFallback.test.ts && tsx tests/tripStatusFlow.test.ts && tsx tests/phase2ManagerScreens.test.ts"
   },
   "dependencies": {
     "@expo-google-fonts/vazirmatn": "^0.2.3",

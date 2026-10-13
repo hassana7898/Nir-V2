@@ -16,6 +16,7 @@ try {
 }
 
 import { apiClient } from '../api/client';
+import { Endpoints } from '../api/endpoints';
 
 // Configure how notifications are handled when the app is foregrounded
 if (Notifications && typeof Notifications.setNotificationHandler === 'function') {
@@ -42,7 +43,7 @@ export async function registerForPushNotificationsAsync(): Promise<PushRegistrat
     if (!Notifications) {
       // Running in headless Node or environment without native notifications
       const dummyToken = `sim-token-${Date.now()}`;
-      await apiClient.post('/mobile/device-token', {
+      await apiClient.post(Endpoints.deviceToken, {
         token: dummyToken,
         platform: Platform.OS || 'android',
       });
@@ -88,7 +89,7 @@ export async function registerForPushNotificationsAsync(): Promise<PushRegistrat
     }
 
     if (token) {
-      await apiClient.post('/mobile/device-token', {
+      await apiClient.post(Endpoints.deviceToken, {
         token,
         platform: Platform.OS || 'android',
       });

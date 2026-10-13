@@ -5,6 +5,7 @@ import {
   Text,
   StyleSheet,
   TouchableOpacity,
+  Alert,
 } from 'react-native';
 
 // Safe dynamic require for signature canvas to support tests / web
@@ -43,9 +44,11 @@ export function SignaturePadModal({
     if (ref.current?.readSignature) {
       ref.current.readSignature();
     } else {
-      // Mock / fallback for testing
-      onSave('data:image/png;base64,mockSignatureBase64String');
-      onClose();
+      // Never fabricate a signature: without the canvas module there is nothing to capture.
+      Alert.alert(
+        'امضای دیجیتال',
+        'قابلیت ثبت امضا در این محیط در دسترس نیست. لطفاً از نسخه اندروید برنامه استفاده کنید.'
+      );
     }
   };
 

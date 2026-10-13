@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { PersianDatePickerModal } from '../../components/common/PersianDatePickerModal';
 import { apiClient } from '../../api/client';
+import { Endpoints } from '../../api/endpoints';
 import { toPersianDigits, formatNumberWithCommas } from '../../utils/formatters';
 import { jalaliText } from '../../utils/jalali';
 
@@ -50,7 +51,7 @@ export function OrderFeedModal({
 
     setSubmitting(true);
     try {
-      await apiClient.post('/api/mobile/farmer/orders', {
+      await apiClient.post(Endpoints.farmer.orders, {
         productId: selectedProduct,
         requestedWeight: numericWeight,
         targetDate,

@@ -13,6 +13,7 @@ import { useQuery } from '@tanstack/react-query';
 import { ScreenContainer } from '../../components/common/ScreenContainer';
 import { StatusBadge } from '../../components/common/StatusBadge';
 import { apiClient } from '../../api/client';
+import { Endpoints } from '../../api/endpoints';
 import { formatWeight, toPersianDigits, formatJalaliDate } from '../../utils/formatters';
 
 export function ApprovalsScreen({ navigation }: any) {
@@ -27,7 +28,7 @@ export function ApprovalsScreen({ navigation }: any) {
   } = useQuery({
     queryKey: ['manager-orders'],
     queryFn: async () => {
-      const res = await apiClient.get('/api/mobile/manager/orders');
+      const res = await apiClient.get(Endpoints.manager.orders);
       return res.data;
     },
     enabled: activeTab === 'orders',
@@ -42,7 +43,7 @@ export function ApprovalsScreen({ navigation }: any) {
   } = useQuery({
     queryKey: ['manager-proofs'],
     queryFn: async () => {
-      const res = await apiClient.get('/api/mobile/manager/proofs');
+      const res = await apiClient.get(Endpoints.manager.proofs);
       return res.data;
     },
     enabled: activeTab === 'proofs',
@@ -53,7 +54,7 @@ export function ApprovalsScreen({ navigation }: any) {
 
   const handleUpdateOrderStatus = async (orderId: number | string, newStatus: 'approved' | 'rejected') => {
     try {
-      await apiClient.patch(`/api/mobile/manager/orders/${orderId}`, { status: newStatus });
+      await apiClient.patch(Endpoints.manager.orderStatus(orderId), { status: newStatus });
       Alert.alert(
         'ثبت تصمیم',
         newStatus === 'approved' ? 'سفارش جیره تایید شد.' : 'سفارش جیره رد شد.'

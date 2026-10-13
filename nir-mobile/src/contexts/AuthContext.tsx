@@ -1,11 +1,17 @@
 /**
  * Authentication Context for NIR Mobile Client.
- * Supports:
- * - Driver / Farmer OTP Authentication
- * - Manager / Admin Username + Password (+ TOTP 2FA)
- * - One-Touch Offline / Demo Mode Access (Zero VPS required)
- * - Auto-bootstrap on app launch from SecureStorage
- * - Automatic session expiration listener
+ *
+ * Supported flows (Phase 1 — real backend only):
+ *   - Driver / Farmer : mobile number + SMS OTP
+ *   - Manager / Admin : username + password (+ optional TOTP 2FA)
+ *
+ * REMOVED in Phase 1 (security):
+ *   - "one-touch offline demo login" that stored a synthetic token plus a mock user profile
+ *   - the OTP/verify offline fallback that granted a session when the server was unreachable
+ *   - the hardcoded fallback credentials inside the password login
+ * A cached session is trusted only when it holds a real access token AND a role the server issued.
+ * (tests/noMockFallback.test.ts fails the build if any of these come back, which is why the exact
+ * identifiers are not repeated here.)
  */
 
 import React, {
@@ -15,9 +21,10 @@ import React, {
   useCallback,
   type ReactNode,
 } from 'react';
-import { apiClient, onAuthExpired, setOfflineDemoMode } from '../api/client';
+import { apiClient, onAuthExpired } from '../api/client';
+import { Endpoints } from '../api/endpoints';
+import { extractApiErrorMessage } from '../api/errors';
 import { SecureStorageService } from '../services/secureStore';
-import { MOCK_USERS } from '../services/mockDataService';
 import type {
   AuthState,
   LoginResponse,
@@ -25,6 +32,12 @@ import type {
   OtpRequestResponse,
   UserRole,
 } from '../types/auth';
+
+export const KNOWN_ROLES: UserRole[] = ['DRIVER', 'FARMER', 'MANAGER', 'ADMIN'];
+
+/** Fail-closed role check: anything the server did not explicitly issue keeps the user signed out. */
+export const isKnownRole = (role: unknown): role is UserRole =>
+  KNOWN_ROLES.includes(String(role || '').toUpperCase() as UserRole);
 
 export interface AuthContextType extends AuthState {
   requestOtp: (phone: string) => Promise<OtpRequestResponse>;
@@ -34,12 +47,18 @@ export interface AuthContextType extends AuthState {
     password: string,
     totpCode?: string
   ) => Promise<LoginResponse>;
-  loginOffline: (role: 'DRIVER' | 'FARMER' | 'MANAGER') => Promise<void>;
   logout: () => Promise<void>;
   refreshSession: () => Promise<void>;
 }
 
 export const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+const UNAUTHENTICATED: AuthState = {
+  isLoading: false,
+  isAuthenticated: false,
+  user: null,
+  role: null,
+};
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>({
@@ -53,21 +72,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const unsubscribe = onAuthExpired(() => {
       console.warn('[NIR Auth] Session expired. Resetting authentication state.');
-      setState({
-        isLoading: false,
-        isAuthenticated: false,
-        user: null,
-        role: null,
-      });
+      setState(UNAUTHENTICATED);
     });
     return () => unsubscribe();
   }, []);
 
-  // Bootstrap session from SecureStore on startup
+  // Bootstrap session from SecureStore on startup (real token + known role only)
   const bootstrapSession = useCallback(async () => {
     try {
       const timeoutPromise = new Promise<null>((resolve) =>
-        setTimeout(() => resolve(null), 1200)
+        setTimeout(() => resolve(null), 1500)
       );
 
       const fetchPromise = Promise.all([
@@ -80,7 +94,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (result) {
         const [accessToken, , cachedUser] = result;
-        if (accessToken && cachedUser) {
+        if (accessToken && cachedUser && isKnownRole(cachedUser.role)) {
           setState({
             isLoading: false,
             isAuthenticated: true,
@@ -89,22 +103,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           });
           return;
         }
+
+        // A stored session without a token, without a user or with a role we never issue is not a
+        // session: wipe it instead of letting the app open a screen it has no rights for.
+        if (accessToken || cachedUser) {
+          console.warn('[NIR Auth] Discarding invalid cached session (missing token or unknown role).');
+          await SecureStorageService.clearAuthSession();
+        }
       }
 
-      setState({
-        isLoading: false,
-        isAuthenticated: false,
-        user: null,
-        role: null,
-      });
+      setState(UNAUTHENTICATED);
     } catch (err) {
       console.error('[NIR Auth] Bootstrap session failed:', err);
-      setState({
-        isLoading: false,
-        isAuthenticated: false,
-        user: null,
-        role: null,
-      });
+      setState(UNAUTHENTICATED);
     }
   }, []);
 
@@ -113,99 +124,54 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [bootstrapSession]);
 
   /**
-   * One-touch offline login for immediate exploration and field work without server.
+   * Request OTP SMS for Drivers / Farmers. Errors are propagated to the screen (no fake code).
    */
-  const loginOffline = useCallback(async (role: 'DRIVER' | 'FARMER' | 'MANAGER'): Promise<void> => {
-    setOfflineDemoMode(true);
-    const mockUser =
-      role === 'DRIVER'
-        ? MOCK_USERS.driver
-        : role === 'FARMER'
-        ? MOCK_USERS.farmer
-        : MOCK_USERS.manager;
+  const requestOtp = useCallback(async (phone: string): Promise<OtpRequestResponse> => {
+    const response = await apiClient.post<OtpRequestResponse>(Endpoints.auth.requestOtp, {
+      phone,
+    });
+    return response.data;
+  }, []);
 
-    const accessToken = `offline_token_${role.toLowerCase()}_${Date.now()}`;
-    const refreshToken = `offline_refresh_${role.toLowerCase()}_${Date.now()}`;
+  /**
+   * Verify OTP and establish a driver/farmer session.
+   */
+  const verifyOtp = useCallback(async (phone: string, code: string): Promise<void> => {
+    const response = await apiClient.post<{
+      success: boolean;
+      user: MobileUser;
+      accessToken: string;
+      refreshToken: string;
+    }>(Endpoints.auth.verifyOtp, { phone, code });
+
+    const { user, accessToken, refreshToken } = response.data;
+
+    if (!accessToken || !refreshToken || !user || !isKnownRole(user.role)) {
+      throw new Error('پاسخ سرور برای ورود نامعتبر بود. لطفاً دوباره تلاش کنید.');
+    }
 
     await Promise.all([
       SecureStorageService.setAccessToken(accessToken),
       SecureStorageService.setRefreshToken(refreshToken),
-      SecureStorageService.setUserData(mockUser),
-      SecureStorageService.setOfflineMode(true),
+      SecureStorageService.setUserData(user),
     ]);
 
     setState({
       isLoading: false,
       isAuthenticated: true,
-      user: mockUser,
-      role: mockUser.role,
+      user,
+      role: user.role,
     });
   }, []);
-
-  /**
-   * Request OTP SMS for Drivers / Farmers.
-   */
-  const requestOtp = useCallback(async (phone: string): Promise<OtpRequestResponse> => {
-    try {
-      const response = await apiClient.post<OtpRequestResponse>('/api/mobile/auth/otp/request', {
-        phone,
-      });
-      return response.data;
-    } catch {
-      // Graceful offline fallback
-      return {
-        success: true,
-        message: 'کد تایید ارسال شد (کد آزمایشی: 123456)',
-        debugCode: '123456',
-      };
-    }
-  }, []);
-
-  /**
-   * Verify OTP and establish driver/farmer session.
-   */
-  const verifyOtp = useCallback(async (phone: string, code: string): Promise<void> => {
-    try {
-      const response = await apiClient.post<{
-        success: boolean;
-        user: MobileUser;
-        accessToken: string;
-        refreshToken: string;
-      }>('/api/mobile/auth/otp/verify', { phone, code });
-
-      const { user, accessToken, refreshToken } = response.data;
-
-      await Promise.all([
-        SecureStorageService.setAccessToken(accessToken),
-        SecureStorageService.setRefreshToken(refreshToken),
-        SecureStorageService.setUserData(user),
-      ]);
-
-      setState({
-        isLoading: false,
-        isAuthenticated: true,
-        user,
-        role: user.role,
-      });
-    } catch {
-      // Offline fallback: determine role by phone or default to DRIVER
-      const isFarmer = phone.includes('444') || phone.endsWith('66');
-      await loginOffline(isFarmer ? 'FARMER' : 'DRIVER');
-    }
-  }, [loginOffline]);
 
   /**
    * Password login for Manager / Admin (+ optional TOTP 2FA).
    */
   const loginWithPassword = useCallback(
-    async (
-      username: string,
-      password: string,
-      totpCode?: string
-    ): Promise<LoginResponse> => {
+    async (username: string, password: string, totpCode?: string): Promise<LoginResponse> => {
       try {
-        const response = await apiClient.post<LoginResponse>('/api/mobile/auth/login', {
-          username,
+        const response = await apiClient.post<LoginResponse>(Endpoints.auth.login, {
+          username: username.trim(),
           password,
           totpCode,
         });
@@ -216,59 +182,54 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return { success: false, requires2FA: true };
         }
 
-        if (data.success && data.user && data.accessToken && data.refreshToken) {
-          await Promise.all([
-            SecureStorageService.setAccessToken(data.accessToken),
-            SecureStorageService.setRefreshToken(data.refreshToken),
-            SecureStorageService.setUserData(data.user),
-          ]);
-
-          setState({
-            isLoading: false,
-            isAuthenticated: true,
-            user: data.user,
-            role: data.user.role,
-          });
+        if (!data.success || !data.user || !data.accessToken || !data.refreshToken) {
+          throw new Error(data.message || 'پاسخ سرور برای ورود نامعتبر بود.');
         }
+
+        if (!isKnownRole(data.user.role)) {
+          throw new Error('نقش کاربری این حساب در اپلیکیشن موبایل پشتیبانی نمی‌شود.');
+        }
+
+        await Promise.all([
+          SecureStorageService.setAccessToken(data.accessToken),
+          SecureStorageService.setRefreshToken(data.refreshToken),
+          SecureStorageService.setUserData(data.user),
+        ]);
+
+        setState({
+          isLoading: false,
+          isAuthenticated: true,
+          user: data.user,
+          role: data.user.role,
+        });
 
         return data;
       } catch (err: any) {
-        // Fallback for default admin/admin123 credentials when server is offline
-        const cleanUser = username.trim().toLowerCase();
-        if (cleanUser === 'admin' && (password === 'admin123' || password === 'admin' || password === '123456')) {
-          await loginOffline('MANAGER');
-          return {
-            success: true,
-            user: MOCK_USERS.manager,
-            accessToken: 'offline_token_manager',
-            refreshToken: 'offline_refresh_manager',
-          };
+        // Some legacy paths answer HTTP 200 with { success:false, twoFactorRequired:true }.
+        const payload = err?.response?.data;
+        if (payload?.twoFactorRequired || payload?.requires2FA) {
+          return { success: false, requires2FA: true };
         }
-        throw err;
+        // No fallback credentials: the server's own message is what the operator must see.
+        throw new Error(extractApiErrorMessage(err, 'نام کاربری یا کلمه عبور اشتباه است'));
       }
     },
-    [loginOffline]
+    []
   );
 
   /**
-   * Logout and clear all storage.
+   * Logout: revoke the server session (the endpoint also deletes the session bound to the refresh
+   * token) and always wipe local credentials, even when the server is unreachable.
    */
   const logout = useCallback(async (): Promise<void> => {
     try {
       const refreshToken = await SecureStorageService.getRefreshToken();
-      if (refreshToken && !refreshToken.startsWith('offline_')) {
-        await apiClient
-          .post('/api/mobile/auth/logout', { refreshToken })
-          .catch(() => {});
-      }
+      await apiClient
+        .post(Endpoints.auth.logout, refreshToken ? { refreshToken } : {})
+        .catch(() => {});
     } finally {
       await SecureStorageService.clearAuthSession();
-      setState({
-        isLoading: false,
-        isAuthenticated: false,
-        user: null,
-        role: null,
-      });
+      setState(UNAUTHENTICATED);
     }
   }, []);
 
@@ -282,23 +243,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    if (refreshToken.startsWith('offline_')) {
-      return; // Offline tokens never expire
-    }
-
     try {
       const response = await apiClient.post<{
         success: boolean;
         accessToken: string;
         refreshToken?: string;
         user?: MobileUser;
-      }>('/api/mobile/auth/refresh', { refreshToken });
+      }>(Endpoints.auth.refresh, { refreshToken });
 
       await SecureStorageService.setAccessToken(response.data.accessToken);
       if (response.data.refreshToken) {
         await SecureStorageService.setRefreshToken(response.data.refreshToken);
       }
-      if (response.data.user) {
+      if (response.data.user && isKnownRole(response.data.user.role)) {
         await SecureStorageService.setUserData(response.data.user);
         setState((prev) => ({
           ...prev,
@@ -318,7 +275,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         requestOtp,
         verifyOtp,
         loginWithPassword,
-        loginOffline,
         logout,
         refreshSession,
       }}

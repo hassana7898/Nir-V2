@@ -33,7 +33,7 @@ test('Push Notification Registration Protocol', async (t) => {
     assert.equal(res.success, true);
     assert.ok(res.token, 'Token should be defined');
     assert.ok(interceptedPost, 'Should call apiClient.post');
-    assert.equal(interceptedPost!.url, '/mobile/device-token');
+    assert.equal(interceptedPost!.url, '/api/mobile/device-token');
     assert.equal(interceptedPost!.data.token, res.token);
     assert.ok(['android', 'ios', 'windows', 'web'].includes(interceptedPost!.data.platform));
   });

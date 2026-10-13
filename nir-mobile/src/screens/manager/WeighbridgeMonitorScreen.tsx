@@ -11,6 +11,7 @@ import { useQuery } from '@tanstack/react-query';
 import { ScreenContainer } from '../../components/common/ScreenContainer';
 import { StatusBadge } from '../../components/common/StatusBadge';
 import { apiClient } from '../../api/client';
+import { Endpoints } from '../../api/endpoints';
 import { formatWeight, toPersianDigits } from '../../utils/formatters';
 
 interface WeighbridgeRecordItem {
@@ -38,7 +39,7 @@ export function WeighbridgeMonitorScreen() {
   const { data, isLoading, refetch, isRefetching } = useQuery({
     queryKey: ['manager-weighbridge'],
     queryFn: async () => {
-      const res = await apiClient.get('/api/mobile/manager/weighbridge');
+      const res = await apiClient.get(Endpoints.manager.weighbridge);
       return res.data;
     },
   });

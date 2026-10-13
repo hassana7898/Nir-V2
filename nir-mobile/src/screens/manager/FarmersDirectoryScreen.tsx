@@ -13,6 +13,7 @@ import {
 import { useQuery } from '@tanstack/react-query';
 import { ScreenContainer } from '../../components/common/ScreenContainer';
 import { apiClient } from '../../api/client';
+import { Endpoints } from '../../api/endpoints';
 import { formatWeight, toPersianDigits } from '../../utils/formatters';
 
 export function FarmersDirectoryScreen({ navigation }: any) {
@@ -21,7 +22,7 @@ export function FarmersDirectoryScreen({ navigation }: any) {
   const { data, isLoading, refetch, isRefetching } = useQuery({
     queryKey: ['manager', 'farmers-directory'],
     queryFn: async () => {
-      const res = await apiClient.get('/api/farmers');
+      const res = await apiClient.get(Endpoints.web.farmers);
       return (res.data?.data || []) as any[];
     },
   });

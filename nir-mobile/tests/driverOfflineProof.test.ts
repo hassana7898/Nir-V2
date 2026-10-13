@@ -28,7 +28,7 @@ test('Driver Proof of Delivery Offline Protocol', async (t) => {
     // Simulate offline state: enqueue directly without auto-flush
     const mutation = await enqueueMutation(
       {
-        endpoint: '/api/mobile/driver/proof',
+        endpoint: '/api/mobile/driver/delivery-receipt',
         method: 'POST',
         payload: mockDeliveryProof,
       },
@@ -40,7 +40,7 @@ test('Driver Proof of Delivery Offline Protocol', async (t) => {
 
     const queue = getOfflineQueue();
     assert.equal(queue.length, 1);
-    assert.equal(queue[0].endpoint, '/api/mobile/driver/proof');
+    assert.equal(queue[0].endpoint, '/api/mobile/driver/delivery-receipt');
     assert.equal(queue[0].payload.invoiceId, 'inv_test_8877');
     assert.equal(queue[0].payload.latitude, 35.6892);
   });
@@ -50,7 +50,7 @@ test('Driver Proof of Delivery Offline Protocol', async (t) => {
 
     // Spin up an ephemeral HTTP server to receive the offline proof
     const server = http.createServer(async (req, res) => {
-      if (req.url === '/api/mobile/driver/proof' && req.method === 'POST') {
+      if (req.url === '/api/mobile/driver/delivery-receipt' && req.method === 'POST') {
         let body = '';
         for await (const chunk of req) body += chunk;
         serverReceivedPayload = JSON.parse(body || '{}');

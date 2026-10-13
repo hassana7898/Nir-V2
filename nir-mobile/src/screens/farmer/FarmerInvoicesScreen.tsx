@@ -11,6 +11,7 @@ import { useQuery } from '@tanstack/react-query';
 import { ScreenContainer } from '../../components/common/ScreenContainer';
 import { StatusBadge } from '../../components/common/StatusBadge';
 import { apiClient } from '../../api/client';
+import { Endpoints } from '../../api/endpoints';
 import {
   formatWeight,
   toPersianDigits,
@@ -34,7 +35,7 @@ export function FarmerInvoicesScreen() {
   const { data, isLoading, refetch, isRefetching } = useQuery({
     queryKey: ['farmer-invoices'],
     queryFn: async () => {
-      const res = await apiClient.get('/api/mobile/farmer/invoices');
+      const res = await apiClient.get(Endpoints.farmer.invoices);
       return res.data;
     },
   });

@@ -12,6 +12,7 @@ import { MetricCard } from '../../components/common/MetricCard';
 import { StatusBadge } from '../../components/common/StatusBadge';
 import { OrderFeedModal } from './OrderFeedModal';
 import { apiClient } from '../../api/client';
+import { Endpoints } from '../../api/endpoints';
 import {
   formatWeight,
   toPersianDigits,
@@ -24,7 +25,7 @@ export function FarmerDashboardScreen({ navigation }: any) {
   const { data, isLoading, refetch, isRefetching } = useQuery({
     queryKey: ['farmer-dashboard'],
     queryFn: async () => {
-      const res = await apiClient.get('/api/mobile/farmer/dashboard');
+      const res = await apiClient.get(Endpoints.farmer.dashboard);
       return res.data;
     },
   });

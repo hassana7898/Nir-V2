@@ -32,8 +32,7 @@ export function ImagePickerAction({
 
   const takePhoto = async () => {
     if (!ImagePicker) {
-      // Mock for test runner
-      onChange('file:///mock/captured_photo.jpg');
+      Alert.alert('دوربین', 'قابلیت تصویربرداری در این محیط در دسترس نیست.');
       return;
     }
     try {
@@ -62,7 +61,7 @@ export function ImagePickerAction({
 
   const pickFromGallery = async () => {
     if (!ImagePicker) {
-      onChange('file:///mock/gallery_image.jpg');
+      Alert.alert('گالری تصاویر', 'دسترسی به گالری در این محیط در دسترس نیست.');
       return;
     }
     try {

@@ -1,338 +1,446 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
-  View,
-  Text,
-  FlatList,
-  TouchableOpacity,
-  TextInput,
-  StyleSheet,
   ActivityIndicator,
+  FlatList,
   RefreshControl,
-  Modal,
-  Alert,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { ScreenContainer } from '../../components/common/ScreenContainer';
 import { StatusBadge } from '../../components/common/StatusBadge';
+import { PersianDatePickerModal } from '../../components/common/PersianDatePickerModal';
 import { apiClient } from '../../api/client';
-import { formatWeight, formatCurrency, toPersianDigits } from '../../utils/formatters';
+import { Endpoints } from '../../api/endpoints';
+import { extractApiErrorMessage } from '../../api/errors';
+import { formatWeight, toPersianDigits } from '../../utils/formatters';
+import {
+  DEFAULT_PAGE_SIZE,
+  RANGE_PRESET_LABELS,
+  WEIGH_STATE_LABELS,
+  buildInvoiceQuery,
+  counterpartyLabel,
+  displayWeightKg,
+  normalizeInvoicesPage,
+  pageSummary,
+  partyName,
+  productLabel,
+  quickRange,
+  rangeLabel,
+  remittanceLabel,
+  weighStateOf,
+  type InvoiceRow,
+  type InvoicesPage,
+  type RangePreset,
+  type RemittanceTab,
+} from '../../features/manager/remittanceList';
 
-export function RemittancesScreen() {
-  const queryClient = useQueryClient();
-  const [activeTab, setActiveTab] = useState<'exit' | 'entry'>('exit');
-  const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'matched' | 'pending' | 'mismatch'>('all');
-  const [showCreateModal, setShowCreateModal] = useState(false);
+const SEARCH_DEBOUNCE_MS = 450;
+const TAB_LABELS: Record<RemittanceTab, string> = { exit: 'خروجی', entry: 'ورودی' };
+const PRESETS: RangePreset[] = ['today', 'last7', 'last30'];
 
-  // Form states for creating a new remittance
-  const [newFarmerName, setNewFarmerName] = useState('');
-  const [newProductName, setNewProductName] = useState('خوراک پلت مرغ گوشتی (رشد)');
-  const [newWeight, setNewWeight] = useState('12500');
-  const [newDriverName, setNewDriverName] = useState('');
-  const [newTruckPlate, setNewTruckPlate] = useState('');
-
-  const { data, isLoading, refetch, isRefetching } = useQuery({
-    queryKey: ['manager', 'all-invoices'],
-    queryFn: async () => {
-      const res = await apiClient.get('/api/invoices');
-      return (res.data?.data || []) as any[];
-    },
-  });
-
-  const invoices = (data || []).filter((inv: any) => {
-    // Tab filter
-    if (inv.type !== activeTab) return false;
-
-    // Status filter
-    if (statusFilter !== 'all') {
-      if (statusFilter === 'matched' && inv.status !== 'matched') return false;
-      if (statusFilter === 'pending' && inv.status !== 'pending') return false;
-      if (statusFilter === 'mismatch' && inv.status !== 'mismatch') return false;
-    }
-
-    // Search filter
-    if (search.trim()) {
-      const q = search.trim().toLowerCase();
-      const num = (inv.invoiceNumber || '').toLowerCase();
-      const party = (inv.farmerName || inv.originName || '').toLowerCase();
-      const driver = (inv.driverName || '').toLowerCase();
-      const plate = (inv.truckPlate || '').toLowerCase();
-      const prod = (inv.productName || '').toLowerCase();
-      return num.includes(q) || party.includes(q) || driver.includes(q) || plate.includes(q) || prod.includes(q);
-    }
-
-    return true;
-  });
-
-  const handleCreateRemittance = () => {
-    if (!newFarmerName.trim()) {
-      Alert.alert('خطا', 'نام مرغدار یا طرف حساب را وارد کنید');
-      return;
-    }
-    Alert.alert('موفقیت', 'حواله با موفقیت ثبت شد و به صف باسکول ارسال گردید.');
-    setShowCreateModal(false);
-    setNewFarmerName('');
-    setNewDriverName('');
-    setNewTruckPlate('');
-  };
-
-  const renderItem = ({ item }: { item: any }) => {
-    const isExit = item.type === 'exit';
-    const isMatched = item.status === 'matched';
-    const isMismatch = item.status === 'mismatch';
-
-    return (
-      <View style={styles.card}>
-        {/* Header Row */}
-        <View style={styles.cardHeader}>
-          <View style={styles.badgeWrap}>
-            <StatusBadge
-              status={isMatched ? 'success' : isMismatch ? 'error' : 'warning'}
-              label={item.statusLabel || (isMatched ? 'منطبق با باسکول' : isMismatch ? 'مغایرت' : 'در انتظار')}
-            />
-          </View>
-          <Text style={styles.invoiceNumber}>{item.invoiceNumber}</Text>
-        </View>
-
-        {/* Destination / Source party */}
-        <View style={styles.row}>
-          <Text style={styles.partyText}>{item.farmerName || item.originName}</Text>
-          <Text style={styles.label}>{isExit ? 'مقصد (مرغدار):' : 'مبدا بارگیری:'}</Text>
-        </View>
-
-        {/* Product & Planned Weight */}
-        <View style={styles.row}>
-          <Text style={styles.valueText}>{item.productName}</Text>
-          <Text style={styles.label}>نوع محصول:</Text>
-        </View>
-
-        <View style={styles.weightsRow}>
-          <View style={styles.weightBox}>
-            <Text style={styles.weightLabel}>وزن حواله</Text>
-            <Text style={styles.weightVal}>{formatWeight(item.plannedWeight || item.amount)}</Text>
-          </View>
-
-          <View style={styles.weightBox}>
-            <Text style={styles.weightLabel}>وزن خالص باسکول</Text>
-            <Text style={[styles.weightVal, item.scaleNetWeight ? styles.scaleActive : styles.scaleEmpty]}>
-              {item.scaleNetWeight ? formatWeight(item.scaleNetWeight) : 'هنوز توزین نشده'}
+function TabSelector({
+  value,
+  counts,
+  onChange,
+}: {
+  value: RemittanceTab;
+  counts: { exit: number; entry: number } | null;
+  onChange: (next: RemittanceTab) => void;
+}) {
+  return (
+    <View style={styles.tabRow}>
+      {(['exit', 'entry'] as RemittanceTab[]).map((t) => {
+        const active = t === value;
+        const count = counts ? counts[t] : null;
+        return (
+          <TouchableOpacity
+            key={t}
+            style={[styles.tab, active && styles.tabActive]}
+            onPress={() => onChange(t)}
+            accessibilityRole="button"
+          >
+            <Text style={[styles.tabText, active && styles.tabTextActive]}>{TAB_LABELS[t]}</Text>
+            <Text style={[styles.tabCount, active && styles.tabTextActive]}>
+              {count === null ? 'در حال شمارش...' : `${toPersianDigits(count)} حواله`}
             </Text>
-          </View>
-        </View>
+          </TouchableOpacity>
+        );
+      })}
+    </View>
+  );
+}
 
-        {/* Driver & Plate */}
-        <View style={styles.driverSection}>
-          <View style={styles.plateBadge}>
-            <Text style={styles.plateText}>{item.truckPlate || '—'}</Text>
-          </View>
-          <View style={styles.driverInfo}>
-            <Text style={styles.driverName}>راننده: {item.driverName || 'نامشخص'}</Text>
-            {item.transportFee ? (
-              <Text style={styles.feeText}>کرایه: {formatCurrency(item.transportFee)}</Text>
-            ) : null}
-          </View>
-        </View>
+function DateRangeBar({
+  startDate,
+  endDate,
+  onPickStart,
+  onPickEnd,
+  onPreset,
+  onClear,
+}: {
+  startDate: string | null;
+  endDate: string | null;
+  onPickStart: () => void;
+  onPickEnd: () => void;
+  onPreset: (preset: RangePreset) => void;
+  onClear: () => void;
+}) {
+  const hasRange = Boolean(startDate || endDate);
+  return (
+    <View style={styles.rangeBox}>
+      <View style={styles.rangeRow}>
+        <TouchableOpacity style={styles.rangeBtn} onPress={onPickStart}>
+          <Text style={styles.rangeBtnLabel}>از تاریخ</Text>
+          <Text style={styles.rangeBtnValue}>
+            {startDate ? toPersianDigits(startDate) : 'انتخاب'}
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.rangeBtn} onPress={onPickEnd}>
+          <Text style={styles.rangeBtnLabel}>تا تاریخ</Text>
+          <Text style={styles.rangeBtnValue}>{endDate ? toPersianDigits(endDate) : 'انتخاب'}</Text>
+        </TouchableOpacity>
+        {hasRange ? (
+          <TouchableOpacity style={styles.clearBtn} onPress={onClear}>
+            <Text style={styles.clearBtnText}>پاک کردن</Text>
+          </TouchableOpacity>
+        ) : null}
+      </View>
 
-        {/* Footer date */}
-        <View style={styles.cardFooter}>
-          <Text style={styles.dateText}>{item.date || 'امروز'}</Text>
-          <Text style={styles.warehouseText}>
-            {item.sourceWarehouse || item.targetWarehouse || 'سیلوی کارخانه آرادان'}
+      <View style={styles.presetRow}>
+        {PRESETS.map((preset) => (
+          <TouchableOpacity
+            key={preset}
+            style={styles.presetBtn}
+            onPress={() => onPreset(preset)}
+          >
+            <Text style={styles.presetText}>{RANGE_PRESET_LABELS[preset]}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      <Text style={styles.rangeHint}>{rangeLabel(startDate, endDate)}</Text>
+    </View>
+  );
+}
+
+function RemittanceCard({ row }: { row: InvoiceRow }) {
+  const weighState = weighStateOf(row);
+  return (
+    <View style={styles.card}>
+      <View style={styles.cardHeader}>
+        <StatusBadge
+          status={weighState === 'weighed' ? 'success' : 'pending'}
+          label={WEIGH_STATE_LABELS[weighState]}
+          size="sm"
+        />
+        <View style={styles.invoiceBox}>
+          <Text style={styles.invoiceLabel}>حواله:</Text>
+          <Text style={styles.invoiceValue}>{toPersianDigits(remittanceLabel(row))}</Text>
+          <Text style={styles.dateText}>
+            {row.date ? toPersianDigits(String(row.date)) : 'بدون تاریخ'}
           </Text>
         </View>
       </View>
-    );
+
+      <View style={styles.infoRow}>
+        <Text style={styles.infoLabel}>{counterpartyLabel(row)}:</Text>
+        <Text style={styles.infoValue}>{partyName(row)}</Text>
+      </View>
+
+      <View style={styles.infoRow}>
+        <Text style={styles.infoLabel}>کالا:</Text>
+        <Text style={styles.infoValue}>{productLabel(row)}</Text>
+      </View>
+
+      <View style={styles.infoRow}>
+        <Text style={styles.infoLabel}>راننده:</Text>
+        <Text style={styles.infoValue}>
+          {row.driverName || 'ثبت نشده'}
+          {row.driverPhone ? ` (${toPersianDigits(row.driverPhone)})` : ''}
+        </Text>
+      </View>
+
+      <View style={styles.weightRow}>
+        <View style={styles.weightBox}>
+          <Text style={styles.weightLabel}>وزن بارنامه</Text>
+          <Text style={styles.weightValue}>
+            {formatWeight(Number(row.billWeight ?? 0) || 0, false)}
+          </Text>
+        </View>
+        <View style={styles.weightBox}>
+          <Text style={styles.weightLabel}>وزن باسکول</Text>
+          <Text style={[styles.weightValue, styles.weightScale]}>
+            {Number(row.scaleWeight ?? 0) > 0
+              ? formatWeight(Number(row.scaleWeight), false)
+              : 'توزین نشده'}
+          </Text>
+        </View>
+        <View style={styles.weightBox}>
+          <Text style={styles.weightLabel}>وزن مرجع</Text>
+          <Text style={styles.weightValue}>{formatWeight(displayWeightKg(row), false)}</Text>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function Pager({
+  page,
+  totalPages,
+  busy,
+  onPrev,
+  onNext,
+}: {
+  page: number;
+  totalPages: number;
+  busy: boolean;
+  onPrev: () => void;
+  onNext: () => void;
+}) {
+  return (
+    <View style={styles.pager}>
+      <TouchableOpacity
+        style={[styles.pagerBtn, (page <= 1 || busy) && styles.pagerBtnDisabled]}
+        disabled={page <= 1 || busy}
+        onPress={onPrev}
+      >
+        <Text style={styles.pagerBtnText}>صفحه قبل</Text>
+      </TouchableOpacity>
+      <Text style={styles.pagerLabel}>
+        صفحه {toPersianDigits(page)} از {toPersianDigits(totalPages)}
+      </Text>
+      <TouchableOpacity
+        style={[styles.pagerBtn, (page >= totalPages || busy) && styles.pagerBtnDisabled]}
+        disabled={page >= totalPages || busy}
+        onPress={onNext}
+      >
+        <Text style={styles.pagerBtnText}>صفحه بعد</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+export function RemittancesScreen() {
+  const [tab, setTab] = useState<RemittanceTab>('exit');
+  const [searchInput, setSearchInput] = useState('');
+  const [search, setSearch] = useState('');
+  const [startDate, setStartDate] = useState<string | null>(null);
+  const [endDate, setEndDate] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const [picker, setPicker] = useState<'start' | 'end' | null>(null);
+
+  // Typing must not fire one request per keystroke; the query key only changes when this settles.
+  useEffect(() => {
+    const handle = setTimeout(() => setSearch(searchInput.trim()), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(handle);
+  }, [searchInput]);
+
+  // Every filter change restarts the list at page 1 (staying on page 7 of a new filter shows nothing).
+  useEffect(() => {
+    setPage(1);
+  }, [tab, search, startDate, endDate]);
+
+  const listQuery = useQuery({
+    queryKey: ['manager', 'remittances', tab, search, startDate, endDate, page],
+    queryFn: async () => {
+      const res = await apiClient.get(Endpoints.web.invoices, {
+        params: buildInvoiceQuery({
+          tab,
+          search,
+          startDate,
+          endDate,
+          page,
+          pageSize: DEFAULT_PAGE_SIZE,
+        }),
+      });
+      return normalizeInvoicesPage(res.data, DEFAULT_PAGE_SIZE);
+    },
+    placeholderData: (previous: InvoicesPage | undefined) => previous,
+  });
+
+  // Two one-row requests give both tab counters from the server, so neither tab shows a guessed number.
+  const countsQuery = useQuery({
+    queryKey: ['manager', 'remittances', 'counts', startDate, endDate],
+    queryFn: async () => {
+      const [exitRes, entryRes] = await Promise.all([
+        apiClient.get(Endpoints.web.invoices, {
+          params: buildInvoiceQuery({ tab: 'exit', startDate, endDate, page: 1, pageSize: 1 }),
+        }),
+        apiClient.get(Endpoints.web.invoices, {
+          params: buildInvoiceQuery({ tab: 'entry', startDate, endDate, page: 1, pageSize: 1 }),
+        }),
+      ]);
+      return {
+        exit: Number(exitRes.data?.total) || 0,
+        entry: Number(entryRes.data?.total) || 0,
+      };
+    },
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const pageData = listQuery.data;
+  const rows = useMemo<InvoiceRow[]>(() => pageData?.rows ?? [], [pageData]);
+  const errorText = listQuery.isError
+    ? extractApiErrorMessage(listQuery.error, 'دریافت فهرست حواله‌ها ناموفق بود.')
+    : null;
+
+  const applyPreset = (preset: RangePreset) => {
+    const range = quickRange(preset);
+    setStartDate(range.startDate);
+    setEndDate(range.endDate);
   };
 
   return (
-    <ScreenContainer title="مدیریت جامع حواله‌ها" subtitle="صدور و تطبیق حواله‌های خروج و ورود خوراک">
-      {/* Top Main Tabs: Exit vs Entry */}
-      <View style={styles.mainTabsRow}>
-        <TouchableOpacity
-          style={[styles.mainTab, activeTab === 'exit' && styles.mainTabActive]}
-          onPress={() => setActiveTab('exit')}
-        >
-          <Text style={[styles.mainTabText, activeTab === 'exit' && styles.mainTabTextActive]}>
-            📤 حواله‌های خروج (فروش به مرغدار)
-          </Text>
-        </TouchableOpacity>
+    <ScreenContainer
+      scrollable={false}
+      title="حواله‌ها"
+      subtitle="فهرست خروجی و ورودی کارخانه — با فیلتر و صفحه‌بندی سروری"
+    >
+      <FlatList
+        data={rows}
+        keyExtractor={(item) => String(item.id)}
+        renderItem={({ item }) => <RemittanceCard row={item} />}
+        contentContainerStyle={styles.listContent}
+        refreshControl={
+          <RefreshControl
+            refreshing={listQuery.isFetching && !listQuery.isLoading}
+            onRefresh={() => {
+              listQuery.refetch();
+              countsQuery.refetch();
+            }}
+            colors={['#0284c7']}
+          />
+        }
+        ListHeaderComponent={
+          <View>
+            <TabSelector value={tab} counts={countsQuery.data ?? null} onChange={setTab} />
 
-        <TouchableOpacity
-          style={[styles.mainTab, activeTab === 'entry' && styles.mainTabActive]}
-          onPress={() => setActiveTab('entry')}
-        >
-          <Text style={[styles.mainTabText, activeTab === 'entry' && styles.mainTabTextActive]}>
-            📥 حواله‌های ورود (مواد اولیه)
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Action Header: Search & Create */}
-      <View style={styles.actionHeader}>
-        <TextInput
-          style={styles.searchInput}
-          value={search}
-          onChangeText={setSearch}
-          placeholder="جستجوی شماره حواله، مرغدار، راننده، پلاک..."
-          placeholderTextColor="#94a3b8"
-        />
-
-        <TouchableOpacity style={styles.createBtn} onPress={() => setShowCreateModal(true)}>
-          <Text style={styles.createBtnText}>+ صدور حواله جدید</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Status Filter Pills */}
-      <View style={styles.filtersRow}>
-        <TouchableOpacity
-          style={[styles.filterPill, statusFilter === 'all' && styles.filterPillActive]}
-          onPress={() => setStatusFilter('all')}
-        >
-          <Text style={[styles.filterText, statusFilter === 'all' && styles.filterTextActive]}>همه</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.filterPill, statusFilter === 'matched' && styles.filterPillActive]}
-          onPress={() => setStatusFilter('matched')}
-        >
-          <Text style={[styles.filterText, statusFilter === 'matched' && styles.filterTextActive]}>
-            منطبق با باسکول
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.filterPill, statusFilter === 'pending' && styles.filterPillActive]}
-          onPress={() => setStatusFilter('pending')}
-        >
-          <Text style={[styles.filterText, statusFilter === 'pending' && styles.filterTextActive]}>
-            در انتظار توزین
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.filterPill, statusFilter === 'mismatch' && styles.filterPillActive]}
-          onPress={() => setStatusFilter('mismatch')}
-        >
-          <Text style={[styles.filterText, statusFilter === 'mismatch' && styles.filterTextActive]}>
-            مغایرت وزن
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Invoices List */}
-      {isLoading ? (
-        <View style={styles.loadingBox}>
-          <ActivityIndicator size="large" color="#0284c7" />
-          <Text style={styles.loadingText}>در حال دریافت لیست حواله‌ها...</Text>
-        </View>
-      ) : (
-        <FlatList
-          data={invoices}
-          keyExtractor={(item) => item.id}
-          renderItem={renderItem}
-          contentContainerStyle={styles.listContent}
-          refreshControl={<RefreshControl refreshing={isRefetching} onRefresh={refetch} />}
-          ListEmptyComponent={
-            <View style={styles.emptyBox}>
-              <Text style={styles.emptyText}>هیچ حواله‌ای با این مشخصات یافت نشد.</Text>
-            </View>
-          }
-        />
-      )}
-
-      {/* CREATE REMITTANCE MODAL */}
-      <Modal visible={showCreateModal} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>صدور حواله خروج خوراک جدید</Text>
-
-            <Text style={styles.formLabel}>نام مرغدار / خریدار:</Text>
             <TextInput
-              style={styles.modalInput}
-              value={newFarmerName}
-              onChangeText={setNewFarmerName}
-              placeholder="مثال: مرغداری برادران حسینی"
+              style={styles.searchInput}
+              placeholder="جست‌وجو: شماره حواله، راننده، کالا، مبدأ یا توضیحات"
+              placeholderTextColor="#94a3b8"
+              value={searchInput}
+              onChangeText={setSearchInput}
+              textAlign="right"
+              returnKeyType="search"
             />
 
-            <Text style={styles.formLabel}>نوع محصول:</Text>
-            <TextInput
-              style={styles.modalInput}
-              value={newProductName}
-              onChangeText={setNewProductName}
-              placeholder="پلت مرغ گوشتی، پیش دان..."
+            <DateRangeBar
+              startDate={startDate}
+              endDate={endDate}
+              onPickStart={() => setPicker('start')}
+              onPickEnd={() => setPicker('end')}
+              onPreset={applyPreset}
+              onClear={() => {
+                setStartDate(null);
+                setEndDate(null);
+              }}
             />
 
-            <Text style={styles.formLabel}>تناژ اعلامی (کیلوگرم):</Text>
-            <TextInput
-              style={styles.modalInput}
-              value={newWeight}
-              onChangeText={setNewWeight}
-              placeholder="12500"
-              keyboardType="number-pad"
-            />
+            <Text style={styles.note}>
+              ثبت حواله جدید طبق روال کارخانه از پنل وب انجام می‌شود؛ این صفحه فقط برای مشاهده و پایش
+              است.
+            </Text>
 
-            <Text style={styles.formLabel}>نام راننده:</Text>
-            <TextInput
-              style={styles.modalInput}
-              value={newDriverName}
-              onChangeText={setNewDriverName}
-              placeholder="مثال: علی کاظمی"
-            />
-
-            <Text style={styles.formLabel}>شماره پلاک خودرو:</Text>
-            <TextInput
-              style={styles.modalInput}
-              value={newTruckPlate}
-              onChangeText={setNewTruckPlate}
-              placeholder="۵۸ع۳۲۱ایران۳۴"
-            />
-
-            <View style={styles.modalBtnRow}>
-              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowCreateModal(false)}>
-                <Text style={styles.cancelBtnText}>انصراف</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.saveBtn} onPress={handleCreateRemittance}>
-                <Text style={styles.saveBtnText}>ثبت و صدور حواله</Text>
-              </TouchableOpacity>
-            </View>
+            {errorText ? (
+              <View style={styles.errorBox}>
+                <Text style={styles.errorText}>{errorText}</Text>
+              </View>
+            ) : null}
           </View>
-        </View>
-      </Modal>
+        }
+        ListEmptyComponent={
+          listQuery.isLoading ? (
+            <View style={styles.loadingBox}>
+              <ActivityIndicator size="large" color="#0284c7" />
+              <Text style={styles.loadingText}>در حال دریافت حواله‌ها از سرور...</Text>
+            </View>
+          ) : errorText ? null : (
+            <View style={styles.emptyBox}>
+              <Text style={styles.emptyText}>
+                {tab === 'exit'
+                  ? 'حواله خروجی با این فیلترها پیدا نشد.'
+                  : 'حواله ورودی با این فیلترها پیدا نشد.'}
+              </Text>
+              <Text style={styles.emptyHint}>
+                بازه تاریخ یا عبارت جست‌وجو را تغییر دهید؛ خالی بودن نتیجه یعنی سرور برای این فیلتر ردیفی
+                برنگردانده است.
+              </Text>
+            </View>
+          )
+        }
+        ListFooterComponent={
+          rows.length > 0 && pageData ? (
+            <View>
+              <Text style={styles.summaryLine}>{toPersianDigits(pageSummary(pageData))}</Text>
+              <Pager
+                page={pageData.page}
+                totalPages={pageData.totalPages}
+                busy={listQuery.isFetching}
+                onPrev={() => setPage((current) => Math.max(1, current - 1))}
+                onNext={() => setPage((current) => current + 1)}
+              />
+            </View>
+          ) : null
+        }
+      />
+
+      <PersianDatePickerModal
+        key={picker ?? 'closed'}
+        visible={picker !== null}
+        initialDate={(picker === 'start' ? startDate : endDate) ?? undefined}
+        onClose={() => setPicker(null)}
+        onSelect={(value) => {
+          if (picker === 'start') setStartDate(value);
+          else setEndDate(value);
+        }}
+      />
     </ScreenContainer>
   );
 }
 
+
+
 const styles = StyleSheet.create({
-  mainTabsRow: {
-    flexDirection: 'row',
-    backgroundColor: '#e2e8f0',
-    borderRadius: 12,
-    padding: 4,
-    marginBottom: 12,
+  listContent: {
+    padding: 14,
+    paddingBottom: 28,
+    gap: 10,
   },
-  mainTab: {
+  tabRow: {
+    flexDirection: 'row-reverse',
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    padding: 4,
+    gap: 4,
+    marginBottom: 10,
+  },
+  tab: {
     flex: 1,
-    paddingVertical: 10,
+    paddingVertical: 8,
     alignItems: 'center',
     borderRadius: 8,
   },
-  mainTabActive: {
-    backgroundColor: '#ffffff',
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowOffset: { width: 0, height: 2 },
-    shadowRadius: 4,
-    elevation: 2,
+  tabActive: {
+    backgroundColor: '#0284c7',
   },
-  mainTabText: {
-    fontFamily: 'Vazirmatn_500Medium',
-    fontSize: 12,
-    color: '#64748b',
-  },
-  mainTabTextActive: {
+  tabText: {
     fontFamily: 'Vazirmatn_700Bold',
-    color: '#0284c7',
+    fontSize: 13,
+    color: '#334155',
   },
-  actionHeader: {
-    gap: 8,
-    marginBottom: 10,
+  tabTextActive: {
+    color: '#ffffff',
+  },
+  tabCount: {
+    fontFamily: 'Vazirmatn_400Regular',
+    fontSize: 10,
+    color: '#64748b',
+    marginTop: 2,
   },
   searchInput: {
     fontFamily: 'Vazirmatn_400Regular',
@@ -344,50 +452,97 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
     fontSize: 13,
     color: '#0f172a',
-    textAlign: 'right',
+    marginBottom: 10,
   },
-  createBtn: {
-    backgroundColor: '#0284c7',
-    paddingVertical: 10,
-    borderRadius: 10,
-    alignItems: 'center',
-  },
-  createBtnText: {
-    fontFamily: 'Vazirmatn_700Bold',
-    fontSize: 13,
-    color: '#ffffff',
-  },
-  filtersRow: {
-    flexDirection: 'row',
-    gap: 6,
-    marginBottom: 12,
-    justifyContent: 'space-between',
-  },
-  filterPill: {
-    flex: 1,
+  rangeBox: {
     backgroundColor: '#ffffff',
+    borderRadius: 10,
     borderWidth: 1,
     borderColor: '#e2e8f0',
+    padding: 10,
+    marginBottom: 10,
+  },
+  rangeRow: {
+    flexDirection: 'row-reverse',
+    gap: 8,
+    alignItems: 'stretch',
+  },
+  rangeBtn: {
+    flex: 1,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    paddingVertical: 7,
+    alignItems: 'center',
+  },
+  rangeBtnLabel: {
+    fontFamily: 'Vazirmatn_400Regular',
+    fontSize: 10,
+    color: '#64748b',
+  },
+  rangeBtnValue: {
+    fontFamily: 'Vazirmatn_700Bold',
+    fontSize: 13,
+    color: '#0f172a',
+    marginTop: 2,
+  },
+  clearBtn: {
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    backgroundColor: '#fee2e2',
+  },
+  clearBtnText: {
+    fontFamily: 'Vazirmatn_500Medium',
+    fontSize: 11,
+    color: '#b91c1c',
+  },
+  presetRow: {
+    flexDirection: 'row-reverse',
+    gap: 6,
+    marginTop: 8,
+  },
+  presetBtn: {
+    flex: 1,
+    backgroundColor: '#e0f2fe',
     borderRadius: 8,
     paddingVertical: 6,
     alignItems: 'center',
   },
-  filterPillActive: {
-    backgroundColor: '#0284c7',
-    borderColor: '#0284c7',
-  },
-  filterText: {
+  presetText: {
     fontFamily: 'Vazirmatn_500Medium',
-    fontSize: 10,
+    fontSize: 11,
+    color: '#0369a1',
+  },
+  rangeHint: {
+    fontFamily: 'Vazirmatn_400Regular',
+    fontSize: 11,
+    color: '#475569',
+    textAlign: 'right',
+    marginTop: 8,
+  },
+  note: {
+    fontFamily: 'Vazirmatn_400Regular',
+    fontSize: 11,
     color: '#64748b',
+    textAlign: 'right',
+    lineHeight: 18,
+    marginBottom: 10,
   },
-  filterTextActive: {
-    color: '#ffffff',
-    fontFamily: 'Vazirmatn_700Bold',
+  errorBox: {
+    backgroundColor: '#fef2f2',
+    borderWidth: 1,
+    borderColor: '#fecaca',
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 10,
   },
-  listContent: {
-    paddingBottom: 24,
-    gap: 12,
+  errorText: {
+    fontFamily: 'Vazirmatn_500Medium',
+    fontSize: 12,
+    color: '#b91c1c',
+    textAlign: 'right',
   },
   card: {
     backgroundColor: '#ffffff',
@@ -395,132 +550,119 @@ const styles = StyleSheet.create({
     padding: 14,
     borderWidth: 1,
     borderColor: '#e2e8f0',
-    shadowColor: '#000000',
-    shadowOpacity: 0.04,
-    shadowOffset: { width: 0, height: 2 },
-    shadowRadius: 6,
-    elevation: 2,
   },
   cardHeader: {
-    flexDirection: 'row',
+    flexDirection: 'row-reverse',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 10,
     borderBottomWidth: 1,
     borderBottomColor: '#f1f5f9',
     paddingBottom: 8,
+    marginBottom: 8,
   },
-  invoiceNumber: {
-    fontFamily: 'Vazirmatn_700Bold',
-    fontSize: 15,
-    color: '#0f172a',
+  invoiceBox: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    gap: 6,
   },
-  badgeWrap: {},
-  row: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 6,
+  invoiceLabel: {
+    fontFamily: 'Vazirmatn_400Regular',
+    fontSize: 12,
+    color: '#64748b',
   },
-  partyText: {
+  invoiceValue: {
     fontFamily: 'Vazirmatn_700Bold',
     fontSize: 14,
-    color: '#0369a1',
-  },
-  label: {
-    fontFamily: 'Vazirmatn_500Medium',
-    fontSize: 12,
-    color: '#64748b',
-  },
-  valueText: {
-    fontFamily: 'Vazirmatn_500Medium',
-    fontSize: 13,
-    color: '#1e293b',
-  },
-  weightsRow: {
-    flexDirection: 'row',
-    gap: 8,
-    marginVertical: 8,
-  },
-  weightBox: {
-    flex: 1,
-    backgroundColor: '#f8fafc',
-    borderRadius: 8,
-    padding: 8,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#f1f5f9',
-  },
-  weightLabel: {
-    fontFamily: 'Vazirmatn_400Regular',
-    fontSize: 10,
-    color: '#64748b',
-    marginBottom: 2,
-  },
-  weightVal: {
-    fontFamily: 'Vazirmatn_700Bold',
-    fontSize: 13,
     color: '#0f172a',
-  },
-  scaleActive: {
-    color: '#16a34a',
-  },
-  scaleEmpty: {
-    color: '#f59e0b',
-    fontSize: 11,
-  },
-  driverSection: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: '#f1f5f9',
-    borderRadius: 8,
-    padding: 8,
-    marginTop: 6,
-  },
-  plateBadge: {
-    backgroundColor: '#ffffff',
-    borderWidth: 1,
-    borderColor: '#cbd5e1',
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-  },
-  plateText: {
-    fontFamily: 'Vazirmatn_700Bold',
-    fontSize: 12,
-    color: '#0f172a',
-  },
-  driverInfo: {
-    alignItems: 'flex-end',
-  },
-  driverName: {
-    fontFamily: 'Vazirmatn_500Medium',
-    fontSize: 12,
-    color: '#334155',
-  },
-  feeText: {
-    fontFamily: 'Vazirmatn_400Regular',
-    fontSize: 10,
-    color: '#64748b',
-    marginTop: 2,
-  },
-  cardFooter: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 8,
-    paddingTop: 6,
-    borderTopWidth: 1,
-    borderTopColor: '#f8fafc',
   },
   dateText: {
     fontFamily: 'Vazirmatn_400Regular',
     fontSize: 11,
     color: '#94a3b8',
   },
-  warehouseText: {
+  infoRow: {
+    flexDirection: 'row-reverse',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginVertical: 3,
+  },
+  infoLabel: {
+    fontFamily: 'Vazirmatn_400Regular',
+    fontSize: 12,
+    color: '#64748b',
+  },
+  infoValue: {
+    fontFamily: 'Vazirmatn_500Medium',
+    fontSize: 13,
+    color: '#1e293b',
+    flexShrink: 1,
+    textAlign: 'right',
+  },
+  weightRow: {
+    flexDirection: 'row-reverse',
+    gap: 8,
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#f8fafc',
+  },
+  weightBox: {
+    flex: 1,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    paddingVertical: 6,
+    alignItems: 'center',
+  },
+  weightLabel: {
+    fontFamily: 'Vazirmatn_400Regular',
+    fontSize: 10,
+    color: '#64748b',
+  },
+  weightValue: {
+    fontFamily: 'Vazirmatn_700Bold',
+    fontSize: 12,
+    color: '#334155',
+    marginTop: 2,
+  },
+  weightScale: {
+    color: '#0284c7',
+  },
+  pager: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    padding: 8,
+    marginTop: 6,
+  },
+  pagerBtn: {
+    backgroundColor: '#e0f2fe',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  pagerBtnDisabled: {
+    backgroundColor: '#f1f5f9',
+  },
+  pagerBtnText: {
+    fontFamily: 'Vazirmatn_500Medium',
+    fontSize: 12,
+    color: '#0369a1',
+  },
+  pagerLabel: {
+    fontFamily: 'Vazirmatn_500Medium',
+    fontSize: 12,
+    color: '#334155',
+  },
+  summaryLine: {
     fontFamily: 'Vazirmatn_400Regular',
     fontSize: 11,
-    color: '#94a3b8',
+    color: '#64748b',
+    textAlign: 'right',
+    marginTop: 8,
   },
   loadingBox: {
     padding: 40,
@@ -533,85 +675,24 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   emptyBox: {
-    padding: 40,
+    padding: 32,
     alignItems: 'center',
   },
   emptyText: {
-    fontFamily: 'Vazirmatn_400Regular',
+    fontFamily: 'Vazirmatn_500Medium',
     fontSize: 13,
+    color: '#475569',
+    textAlign: 'center',
+  },
+  emptyHint: {
+    fontFamily: 'Vazirmatn_400Regular',
+    fontSize: 11,
     color: '#94a3b8',
-  },
-  // MODAL
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-  },
-  modalContent: {
-    backgroundColor: '#ffffff',
-    borderRadius: 16,
-    padding: 20,
-    width: '100%',
-    maxWidth: 420,
-  },
-  modalTitle: {
-    fontFamily: 'Vazirmatn_700Bold',
-    fontSize: 16,
-    color: '#0f172a',
-    marginBottom: 14,
-    textAlign: 'right',
-  },
-  formLabel: {
-    fontFamily: 'Vazirmatn_500Medium',
-    fontSize: 12,
-    color: '#334155',
-    marginBottom: 4,
-    textAlign: 'right',
-  },
-  modalInput: {
-    fontFamily: 'Vazirmatn_400Regular',
-    backgroundColor: '#f8fafc',
-    borderWidth: 1,
-    borderColor: '#cbd5e1',
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    fontSize: 13,
-    color: '#0f172a',
-    textAlign: 'right',
-    marginBottom: 10,
-  },
-  modalBtnRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 10,
-  },
-  cancelBtn: {
-    flex: 1,
-    backgroundColor: '#f1f5f9',
-    borderRadius: 8,
-    paddingVertical: 10,
-    alignItems: 'center',
-  },
-  cancelBtnText: {
-    fontFamily: 'Vazirmatn_500Medium',
-    fontSize: 13,
-    color: '#64748b',
-  },
-  saveBtn: {
-    flex: 2,
-    backgroundColor: '#0284c7',
-    borderRadius: 8,
-    paddingVertical: 10,
-    alignItems: 'center',
-  },
-  saveBtnText: {
-    fontFamily: 'Vazirmatn_700Bold',
-    fontSize: 13,
-    color: '#ffffff',
+    textAlign: 'center',
+    marginTop: 6,
+    lineHeight: 18,
   },
 });
 
 export default RemittancesScreen;
+

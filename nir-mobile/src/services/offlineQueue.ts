@@ -27,6 +27,7 @@ try {
 }
 
 import { apiClient } from '../api/client';
+import { materializeQueuedPayload } from './multipartPayload';
 import type { DeadLetterItem, OfflineMutation } from '../types/offline';
 
 const QUEUE_STORAGE_KEY = 'offline_mutations';
@@ -179,11 +180,17 @@ export async function flushOfflineQueue(): Promise<{ processed: number; failed: 
 
     for (const mutation of queue) {
       try {
+        // A queued payload may be a JSON-safe multipart envelope (photos captured offline):
+        // it is rebuilt into FormData here, at the moment the connection is back.
+        const prepared = materializeQueuedPayload(mutation.payload);
+
         await apiClient.request({
           url: mutation.endpoint,
           method: mutation.method,
-          data: mutation.payload,
-          headers: mutation.headers,
+          data: prepared.data,
+          headers: prepared.headers
+            ? { ...(mutation.headers || {}), ...prepared.headers }
+            : mutation.headers,
         });
 
         processed += 1;

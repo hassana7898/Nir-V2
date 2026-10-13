@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 import { ScreenContainer } from '../../components/common/ScreenContainer';
 import { useAuth } from '../../hooks/useAuth';
-import { getApiBaseUrl, setApiBaseUrl, getOfflineDemoMode, setOfflineDemoMode } from '../../api/client';
+import { getApiBaseUrl, setApiBaseUrl, describeApiTarget } from '../../api/client';
 
 export function MoreMenuScreen({ navigation }: any) {
   const { user, logout } = useAuth();
@@ -34,8 +34,15 @@ export function MoreMenuScreen({ navigation }: any) {
       Alert.alert('خطا', 'آدرس سرور نمی‌تواند خالی باشد');
       return;
     }
-    setApiBaseUrl(serverUrl.trim());
+
+    const decision = setApiBaseUrl(serverUrl.trim());
     setShowServerModal(false);
+
+    if (!decision.allowed) {
+      Alert.alert('آدرس رد شد', decision.reason || 'این آدرس برای این نسخه مجاز نیست.');
+      return;
+    }
+
     Alert.alert('موفقیت', 'آدرس سرور با موفقیت به‌روزرسانی شد.');
   };
 
@@ -48,9 +55,15 @@ export function MoreMenuScreen({ navigation }: any) {
             <Text style={styles.avatarText}>مدیر</Text>
           </View>
           <View style={styles.userInfo}>
-            <Text style={styles.userName}>{user?.fullName || 'مهندس حسینی'}</Text>
-            <Text style={styles.userRole}>مدیر ارشد کارخانه خوراک دام و طیور آرادان</Text>
-            <Text style={styles.userPhone}>شماره تماس: {user?.phone || '09129990001'}</Text>
+            <Text style={styles.userName}>{user?.fullName || 'کاربر سامانه'}</Text>
+            <Text style={styles.userRole}>
+              {user?.role === 'ADMIN'
+                ? 'مدیر ارشد سامانه'
+                : user?.role === 'MANAGER'
+                ? 'مدیر کارخانه خوراک دام و طیور آرادان'
+                : 'کاربر سامانه'}
+            </Text>
+            <Text style={styles.userPhone}>شماره تماس: {user?.phone || '—'}</Text>
           </View>
         </View>
 
@@ -68,6 +81,22 @@ export function MoreMenuScreen({ navigation }: any) {
             <View style={styles.menuTextWrap}>
               <Text style={styles.menuTitle}>مرغداران و دوره‌های پرورش</Text>
               <Text style={styles.menuDesc}>مشاهده فهرست مرغداران، دوره‌ها، سن گله و سوابق خرید دان</Text>
+            </View>
+            <Text style={styles.chevron}>‹</Text>
+          </TouchableOpacity>
+
+          {/* راننده‌های نامطابق (Phase 2, G-7): read-only report the office works from */}
+          <TouchableOpacity
+            style={styles.menuItem}
+            onPress={() => navigation.navigate('UnmatchedDrivers')}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.menuIcon}>🧩</Text>
+            <View style={styles.menuTextWrap}>
+              <Text style={styles.menuTitle}>راننده‌های نامطابق</Text>
+              <Text style={styles.menuDesc}>
+                حواله‌هایی که نام راننده دارند اما به پرونده راننده وصل نشده‌اند
+              </Text>
             </View>
             <Text style={styles.chevron}>‹</Text>
           </TouchableOpacity>
@@ -124,6 +153,8 @@ export function MoreMenuScreen({ navigation }: any) {
             <Text style={styles.modalDesc}>
               آدرس سرور مجازی (VPS) یا سرور توسعه را وارد کنید:
             </Text>
+
+            <Text style={styles.modalDesc}>اتصال فعلی: {describeApiTarget()}</Text>
 
             <TextInput
               style={styles.modalInput}

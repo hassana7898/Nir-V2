@@ -14,6 +14,9 @@ import { SignaturePadModal } from '../../components/hardware/SignaturePadModal';
 import { useNetworkStatus } from '../../hooks/useNetworkStatus';
 import { useOfflineQueue } from '../../hooks/useOfflineQueue';
 import { apiClient } from '../../api/client';
+import { Endpoints } from '../../api/endpoints';
+import { extractApiErrorMessage } from '../../api/errors';
+import { buildPodRequest, buildQueuedPodPayload } from '../../features/driver/podPayload';
 import { toPersianDigits } from '../../utils/formatters';
 
 let Location: any = null;
@@ -42,7 +45,9 @@ export function DeliveryProofScreen({ route, navigation }: any) {
   useEffect(() => {
     async function getGps() {
       if (!Location) {
-        setLocation({ latitude: 35.6892, longitude: 51.389 });
+        // No location module (headless/test runtime): report "unknown" instead of submitting a
+        // fabricated coordinate as proof of delivery.
+        setLocation(null);
         return;
       }
       try {
@@ -71,23 +76,23 @@ export function DeliveryProofScreen({ route, navigation }: any) {
     }
 
     setSubmitting(true);
-    const payload = {
+    const podInput = {
       invoiceId: invoiceId || load?.id,
-      photoBillUrl: photoBill || undefined,
-      photoScaleUrl: photoScale || undefined,
-      signatureUrl: signature,
-      latitude: location?.latitude,
-      longitude: location?.longitude,
-      deliveredAt: new Date().toISOString(),
+      photoBillUri: photoBill,
+      photoScaleUri: photoScale,
+      signatureDataUrl: signature,
+      latitude: location?.latitude ?? null,
+      longitude: location?.longitude ?? null,
     };
 
     try {
       if (isOffline) {
-        // Enqueue offline mutation directly
+        // JSON-safe envelope: inline base64 stays as-is, local photos keep their URIs and are
+        // rebuilt as multipart when the queue flushes after reconnection.
         await enqueue({
-          endpoint: '/api/mobile/driver/proof',
+          endpoint: Endpoints.driver.submitProof,
           method: 'POST',
-          payload,
+          payload: buildQueuedPodPayload(podInput) as any,
         });
 
         Alert.alert(
@@ -96,8 +101,12 @@ export function DeliveryProofScreen({ route, navigation }: any) {
           [{ text: 'متوجه شدم', onPress: () => navigation.goBack() }]
         );
       } else {
-        // Online submit
-        await apiClient.post('/api/mobile/driver/proof', payload);
+        const request = buildPodRequest(podInput);
+        await apiClient.post(
+          request.endpoint,
+          request.payload,
+          request.headers ? { headers: request.headers } : undefined
+        );
 
         Alert.alert(
           'ثبت موفق رسید',
@@ -106,18 +115,27 @@ export function DeliveryProofScreen({ route, navigation }: any) {
         );
       }
     } catch (err: any) {
-      // If network fails unexpectedly during request, fallback to queue
-      await enqueue({
-        endpoint: '/api/mobile/driver/proof',
-        method: 'POST',
-        payload,
-      });
+      if (!err?.response) {
+        // Genuine network outage -> queue it, that is exactly what the queue is for.
+        await enqueue({
+          endpoint: Endpoints.driver.submitProof,
+          method: 'POST',
+          payload: buildQueuedPodPayload(podInput) as any,
+        });
 
-      Alert.alert(
-        'ذخیره در صف آفلاین',
-        'ارتباط با سرور برقرار نشد؛ رسید در صف آفلاین دستگاه ذخیره گردید و به زودی ارسال می‌شود.',
-        [{ text: 'متوجه شدم', onPress: () => navigation.goBack() }]
-      );
+        Alert.alert(
+          'ذخیره در صف آفلاین',
+          'ارتباط با سرور برقرار نشد؛ رسید در صف آفلاین دستگاه ذخیره گردید و به زودی ارسال می‌شود.',
+          [{ text: 'متوجه شدم', onPress: () => navigation.goBack() }]
+        );
+      } else {
+        // The server answered and rejected the receipt (invalid data, unknown invoice, 5xx…).
+        // Queueing it would retry a doomed request forever, so the reason is shown to the driver.
+        Alert.alert(
+          'خطا در ثبت رسید',
+          extractApiErrorMessage(err, 'ثبت رسید تحویل بار با خطا مواجه شد.')
+        );
+      }
     } finally {
       setSubmitting(false);
     }

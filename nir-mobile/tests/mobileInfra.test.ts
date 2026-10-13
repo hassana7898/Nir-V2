@@ -50,6 +50,7 @@ import {
   onAuthExpired,
   notifyAuthExpired,
 } from '../src/api/client';
+import { Endpoints } from '../src/api/endpoints';
 
 test('Mobile Core Infrastructure Test Suite', async (t) => {
   await t.test('Jalali conversion and date distance', () => {
@@ -144,15 +145,15 @@ test('Mobile Core Infrastructure Test Suite', async (t) => {
     assert.equal(getPendingMutationCount(), 0);
 
     const m1 = await enqueueMutation({
-      endpoint: '/api/mobile/driver/proof',
+      endpoint: Endpoints.driver.submitProof,
       method: 'POST',
-      payload: { invoiceId: 'inv_1', signature: 'base64_sig' },
+      payload: { invoice_id: 'inv_1', signature_base64: 'data:image/png;base64,abc' },
     });
 
     const m2 = await enqueueMutation({
-      endpoint: '/api/mobile/farmer/order',
+      endpoint: Endpoints.farmer.orders,
       method: 'POST',
-      payload: { productId: 'prd_1', weight: 5000 },
+      payload: { productId: 'prd_1', requestedWeight: 5000 },
     });
 
     assert.equal(getPendingMutationCount(), 2);

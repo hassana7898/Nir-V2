@@ -121,21 +121,6 @@ export class SecureStorageService {
   }
 
   /**
-   * Retrieves offline demo mode flag.
-   */
-  static async getOfflineMode(): Promise<boolean> {
-    const val = await getItemSafe('nir_offline_demo_mode');
-    return val === 'true';
-  }
-
-  /**
-   * Persists offline demo mode flag.
-   */
-  static async setOfflineMode(enabled: boolean): Promise<void> {
-    await setItemSafe('nir_offline_demo_mode', enabled ? 'true' : 'false');
-  }
-
-  /**
    * Wipes all credentials and user profile data on logout or session expiration.
    */
   static async clearAuthSession(): Promise<void> {

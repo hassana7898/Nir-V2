@@ -9,6 +9,7 @@ import { useQuery } from '@tanstack/react-query';
 import { ScreenContainer } from '../../components/common/ScreenContainer';
 import { MetricCard } from '../../components/common/MetricCard';
 import { apiClient } from '../../api/client';
+import { Endpoints } from '../../api/endpoints';
 import {
   formatWeight,
   toPersianDigits,
@@ -18,21 +19,32 @@ export function ManagerKpiScreen() {
   const { data, isLoading, refetch, isRefetching } = useQuery({
     queryKey: ['manager-kpi'],
     queryFn: async () => {
-      const res = await apiClient.get('/api/mobile/manager/kpi');
+      const res = await apiClient.get(Endpoints.manager.kpi);
       return res.data;
     },
   });
 
-  const entryTonnage = data?.todayEntryWeight || data?.entryTonnage || 0;
-  const exitTonnage = data?.todayExitWeight || data?.exitTonnage || 0;
-  const ticketsCount = data?.todayTicketsCount || data?.ticketsCount || 0;
-  const discrepanciesCount = data?.discrepanciesCount || 0;
-  const inventoryItems = data?.inventorySummary || [];
+  // Live field names from GET /api/mobile/manager/kpi (server/routes/mobile.ts). The Phase 1 screen read
+  // `todayEntryWeight` / `entryTonnage` / `inventorySummary` — names that endpoint has never returned —
+  // so every card showed 0 and the inventory block silently fell back to hand-written sample rows.
+  const todayJalali = String(data?.todayJalali || '');
+  const entryTonnageKg = Number(data?.entryTonnageKg || 0);
+  const exitTonnageKg = Number(data?.exitTonnageKg || 0);
+  const entryTonnageTon = Number(data?.entryTonnageTon ?? entryTonnageKg / 1000);
+  const exitTonnageTon = Number(data?.exitTonnageTon ?? exitTonnageKg / 1000);
+  const invoicesCount = Number(data?.todayInvoicesCount || 0);
+  const weighbridgeCount = Number(data?.weighbridgeTicketsToday || 0);
+  const inventoryItems: any[] = Array.isArray(data?.inventory) ? data.inventory : [];
+
 
   return (
     <ScreenContainer
       title="داشبورد پایش کارخانه"
-      subtitle="شاخص‌های زنده تولید، انبار و باسکول"
+      subtitle={
+        todayJalali
+          ? `امروز ${toPersianDigits(todayJalali)} — شاخص‌های زنده تولید، انبار و باسکول`
+          : 'شاخص‌های زنده تولید، انبار و باسکول'
+      }
       onRefresh={refetch}
       refreshing={isRefetching}
     >
@@ -49,34 +61,34 @@ export function ManagerKpiScreen() {
           <View style={styles.kpiGrid}>
             <MetricCard
               title="مجموع ورود امروز"
-              value={entryTonnage}
+              value={entryTonnageKg}
               unit="کیلوگرم"
               variant="primary"
-              subtitle="مواد اولیه و نهاده‌های ورودی"
+              subtitle={`معادل ${toPersianDigits(entryTonnageTon)} تن — نهاده‌های ورودی`}
             />
             <MetricCard
               title="مجموع خروج امروز"
-              value={exitTonnage}
+              value={exitTonnageKg}
               unit="کیلوگرم"
               variant="success"
-              subtitle="خوراک بارگیری‌شده مرغداری‌ها"
+              subtitle={`معادل ${toPersianDigits(exitTonnageTon)} تن — خوراک بارگیری‌شده`}
             />
           </View>
 
           <View style={styles.kpiGrid}>
             <MetricCard
-              title="قبوض باسکول امروز"
-              value={ticketsCount}
-              unit="قبض"
+              title="حواله‌های امروز"
+              value={invoicesCount}
+              unit="حواله"
               variant="default"
-              subtitle="تردد کامیون‌های کارخانه"
+              subtitle="مجموع ورودی و خروجی ثبت‌شده امروز"
             />
             <MetricCard
-              title="هشدارهای مغایرت وزن"
-              value={discrepanciesCount}
-              unit="مورد"
-              variant={discrepanciesCount > 0 ? 'danger' : 'success'}
-              subtitle="اختلاف باسکول با بارنامه"
+              title="قبوض باسکول امروز"
+              value={weighbridgeCount}
+              unit="قبض"
+              variant="default"
+              subtitle="توزین یا همگام‌سازی‌شده در سرور باسکول"
             />
           </View>
 
@@ -84,43 +96,47 @@ export function ManagerKpiScreen() {
           <View style={styles.card}>
             <View style={styles.cardHeader}>
               <Text style={styles.cardTitle}>موجودی زنده انبارهای کارخانه</Text>
-              <Text style={styles.cardSub}>بر اساس آخرین محاسبات انبارداری</Text>
+              <Text style={styles.cardSub}>از ستون «موجودی فعلی» اقلام کالا در سرور</Text>
             </View>
 
             {inventoryItems.length > 0 ? (
               <View style={styles.inventoryList}>
-                {inventoryItems.map((item: any, idx: number) => (
-                  <View key={item.id || idx} style={styles.invRow}>
-                    <Text style={styles.invName}>{item.productName || item.name}</Text>
-                    <Text
-                      style={[
-                        styles.invStock,
-                        item.stock < 0 ? styles.negativeStock : null,
-                      ]}
-                    >
-                      {formatWeight(item.stock || item.balance || 0)}
-                    </Text>
-                  </View>
-                ))}
+                {inventoryItems.slice(0, 10).map((item: any, idx: number) => {
+                  const stock = Number(item.currentStock || 0);
+                  const min =
+                    item.minStock === null || item.minStock === undefined
+                      ? null
+                      : Number(item.minStock);
+                  const belowMin = min !== null && stock < min;
+                  return (
+                    <View key={item.id || idx} style={styles.invRow}>
+                      <View style={styles.invNameWrap}>
+                        <Text style={styles.invName}>{item.name}</Text>
+                        {stock <= 0 ? (
+                          <Text style={styles.invWarn}>ناموجود</Text>
+                        ) : belowMin ? (
+                          <Text style={styles.invWarn}>کمتر از حد بحرانی</Text>
+                        ) : null}
+                      </View>
+                      <Text style={[styles.invStock, stock <= 0 && styles.negativeStock]}>
+                        {formatWeight(stock)}
+                      </Text>
+                    </View>
+                  );
+                })}
+                {inventoryItems.length > 10 ? (
+                  <Text style={styles.invMore}>
+                    و {toPersianDigits(inventoryItems.length - 10)} قلم دیگر — فهرست کامل در تب «انبار و
+                    سیلو»
+                  </Text>
+                ) : null}
               </View>
             ) : (
-              <View style={styles.sampleInventory}>
-                <View style={styles.invRow}>
-                  <Text style={styles.invName}>ذرت دامی برزیلی (سیلو ۱)</Text>
-                  <Text style={styles.invStock}>{formatWeight(452000)}</Text>
-                </View>
-                <View style={styles.invRow}>
-                  <Text style={styles.invName}>کنجاله سویا ۵۰٪ (انبار مرکزی)</Text>
-                  <Text style={styles.invStock}>{formatWeight(185400)}</Text>
-                </View>
-                <View style={styles.invRow}>
-                  <Text style={styles.invName}>دان پلت میان‌دان مرغ گوشتی</Text>
-                  <Text style={styles.invStock}>{formatWeight(94800)}</Text>
-                </View>
-                <View style={styles.invRow}>
-                  <Text style={styles.invName}>پرمیکس و مکمل ویتامینه</Text>
-                  <Text style={styles.invStock}>{formatWeight(12500)}</Text>
-                </View>
+              <View style={styles.invEmpty}>
+                <Text style={styles.invEmptyText}>
+                  هنوز موجودی‌ای برای نمایش ثبت نشده است؛ این بخش از اقلام فعال کالا روی سرور خوانده
+                  می‌شود و هیچ ردیف نمونه‌ای نمایش داده نمی‌شود.
+                </Text>
               </View>
             )}
           </View>
@@ -182,6 +198,33 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderBottomWidth: 1,
     borderBottomColor: '#f8fafc',
+  },
+  invNameWrap: {
+    flexShrink: 1,
+    alignItems: 'flex-end',
+  },
+  invWarn: {
+    fontFamily: 'Vazirmatn_500Medium',
+    fontSize: 10,
+    color: '#d97706',
+    marginTop: 2,
+  },
+  invMore: {
+    fontFamily: 'Vazirmatn_400Regular',
+    fontSize: 10,
+    color: '#64748b',
+    textAlign: 'right',
+    marginTop: 8,
+  },
+  invEmpty: {
+    paddingVertical: 12,
+  },
+  invEmptyText: {
+    fontFamily: 'Vazirmatn_400Regular',
+    fontSize: 11,
+    color: '#94a3b8',
+    textAlign: 'right',
+    lineHeight: 18,
   },
   invName: {
     fontFamily: 'Vazirmatn_500Medium',

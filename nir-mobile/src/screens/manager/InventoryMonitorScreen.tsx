@@ -1,138 +1,236 @@
-import React from 'react';
+import React, { useMemo, useState } from 'react';
 import {
-  View,
-  Text,
-  FlatList,
-  StyleSheet,
   ActivityIndicator,
+  FlatList,
   RefreshControl,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import { useQuery } from '@tanstack/react-query';
 import { ScreenContainer } from '../../components/common/ScreenContainer';
+import { StatusBadge } from '../../components/common/StatusBadge';
 import { apiClient } from '../../api/client';
+import { Endpoints } from '../../api/endpoints';
+import { extractApiErrorMessage } from '../../api/errors';
 import { formatWeight, toPersianDigits } from '../../utils/formatters';
+import {
+  INVENTORY_FILTER_LABELS,
+  STOCK_TONE_LABELS,
+  filterInventory,
+  inventoryTypeLabel,
+  minStockLabel,
+  normalizeInventoryItems,
+  stockBarPercent,
+  stockTone,
+  summarizeInventory,
+  type InventoryFilter,
+  type InventoryItem,
+  type InventorySummary,
+} from '../../features/manager/inventoryView';
+
+const FILTERS: InventoryFilter[] = ['all', 'raw', 'finished', 'attention'];
+
+const TONE_VARIANT: Record<string, string> = { ok: 'success', low: 'warning', out: 'error' };
+
+function SummaryCard({ summary }: { summary: InventorySummary }) {
+  return (
+    <View style={styles.summaryCard}>
+      <Text style={styles.summaryTitle}>موجودی زنده اقلام (بر پایه سامانه انبارداری)</Text>
+      <View style={styles.summaryRow}>
+        <View style={styles.summaryItem}>
+          <Text style={styles.summaryLabel}>اقلام فعال</Text>
+          <Text style={styles.summaryVal}>{toPersianDigits(summary.totalItems)}</Text>
+        </View>
+        <View style={styles.summaryDivider} />
+        <View style={styles.summaryItem}>
+          <Text style={styles.summaryLabel}>کل موجودی</Text>
+          <Text style={styles.summaryVal}>{formatWeight(summary.totalStockKg, false)}</Text>
+        </View>
+        <View style={styles.summaryDivider} />
+        <View style={styles.summaryItem}>
+          <Text style={styles.summaryLabel}>کم‌موجود</Text>
+          <Text style={[styles.summaryVal, styles.summaryWarn]}>
+            {toPersianDigits(summary.lowCount)}
+          </Text>
+        </View>
+        <View style={styles.summaryDivider} />
+        <View style={styles.summaryItem}>
+          <Text style={styles.summaryLabel}>ناموجود</Text>
+          <Text style={[styles.summaryVal, styles.summaryDanger]}>
+            {toPersianDigits(summary.outCount)}
+          </Text>
+        </View>
+      </View>
+      <Text style={styles.summaryNote}>
+        اعداد از ستون «موجودی فعلی» اقلام کالا خوانده می‌شود؛ رشد یا کاهش آن با هر تراکنش انبار در سرور
+        به‌روز می‌شود.
+      </Text>
+    </View>
+  );
+}
+
+function ItemCard({ item, maxStockKg }: { item: InventoryItem; maxStockKg: number }) {
+  const tone = stockTone(item);
+  const percent = stockBarPercent(item, maxStockKg);
+
+  return (
+    <View style={styles.card}>
+      <View style={styles.cardHeader}>
+        <StatusBadge status={TONE_VARIANT[tone]} label={STOCK_TONE_LABELS[tone]} size="sm" />
+        <Text style={styles.itemName}>{item.name}</Text>
+      </View>
+
+      <Text style={styles.itemType}>{inventoryTypeLabel(item.type)}</Text>
+
+      <View style={styles.progressContainer}>
+        <View
+          style={[
+            styles.progressBar,
+            { width: `${percent}%` },
+            tone === 'low' && styles.progressBarWarn,
+            tone === 'out' && styles.progressBarOut,
+          ]}
+        />
+      </View>
+
+      <View style={styles.statsRow}>
+        <View style={styles.statBox}>
+          <Text style={styles.statLabel}>موجودی فعلی</Text>
+          <Text style={[styles.statVal, styles.stockVal]}>{formatWeight(item.currentStock)}</Text>
+        </View>
+        <View style={styles.statBox}>
+          <Text style={styles.statLabel}>حد بحرانی</Text>
+          <Text style={styles.statVal}>
+            {item.minStock === null ? 'تعیین نشده' : formatWeight(item.minStock)}
+          </Text>
+        </View>
+      </View>
+
+      <Text style={styles.itemHint}>{minStockLabel(item)}</Text>
+    </View>
+  );
+}
 
 export function InventoryMonitorScreen() {
-  const { data, isLoading, refetch, isRefetching } = useQuery({
-    queryKey: ['manager', 'inventory-monitor'],
+  const [filter, setFilter] = useState<InventoryFilter>('all');
+
+  // Same query key as the KPI tab on purpose: react-query then shares one request for both screens.
+  const inventoryQuery = useQuery({
+    queryKey: ['manager', 'kpi'],
     queryFn: async () => {
-      const res = await apiClient.get('/api/warehouses');
-      return (res.data?.data || []) as any[];
+      const res = await apiClient.get(Endpoints.manager.kpi);
+      return res.data;
     },
   });
 
-  const warehouses = data || [];
+  const items = useMemo<InventoryItem[]>(
+    () => normalizeInventoryItems(inventoryQuery.data?.inventory),
+    [inventoryQuery.data]
+  );
+  const summary = useMemo<InventorySummary>(() => summarizeInventory(items), [items]);
+  const visible = useMemo<InventoryItem[]>(() => filterInventory(items, filter), [items, filter]);
 
-  const totalCapacityKg = warehouses.reduce((sum: number, w: any) => sum + (w.capacityKg || 0), 0);
-  const totalStockKg = warehouses.reduce((sum: number, w: any) => sum + (w.currentStockKg || 0), 0);
-  const overallPercent = totalCapacityKg > 0 ? ((totalStockKg / totalCapacityKg) * 100).toFixed(1) : '0';
-
-  const renderItem = ({ item }: { item: any }) => {
-    const percent = Math.min(100, Math.max(0, item.percent || 0));
-    const isWarning = percent < 30 || percent > 90;
-
-    return (
-      <View style={styles.card}>
-        <View style={styles.cardHeader}>
-          <View style={[styles.badge, isWarning ? styles.badgeWarning : styles.badgeNormal]}>
-            <Text style={[styles.badgeText, isWarning ? styles.badgeTextWarning : styles.badgeTextNormal]}>
-              {percent.toFixed(0)}٪ پر شده
-            </Text>
-          </View>
-          <Text style={styles.warehouseName}>{item.name}</Text>
-        </View>
-
-        <Text style={styles.productName}>محتوا: {item.productName || 'موجودیت نامشخص'}</Text>
-
-        {/* Progress Bar */}
-        <View style={styles.progressContainer}>
-          <View style={[styles.progressBar, { width: `${percent}%` }, isWarning && styles.progressBarWarn]} />
-        </View>
-
-        {/* Stats Row */}
-        <View style={styles.statsRow}>
-          <View style={styles.statBox}>
-            <Text style={styles.statLabel}>ظرفیت اسمی سیلو</Text>
-            <Text style={styles.statVal}>{formatWeight(item.capacityKg || 0)}</Text>
-          </View>
-
-          <View style={styles.statBox}>
-            <Text style={styles.statLabel}>موجودی فعلی</Text>
-            <Text style={[styles.statVal, styles.stockVal]}>{formatWeight(item.currentStockKg || 0)}</Text>
-          </View>
-        </View>
-      </View>
-    );
-  };
+  const errorText = inventoryQuery.isError
+    ? extractApiErrorMessage(inventoryQuery.error, 'دریافت موجودی انبار ناموفق بود.')
+    : null;
 
   return (
-    <ScreenContainer title="پایش سیلوها و انبارها" subtitle="موجودی لحظه‌ای مواد اولیه و خوراک آماده پلت">
-      {/* Executive Summary Card */}
-      <View style={styles.summaryCard}>
-        <Text style={styles.summaryTitle}>وضعیت کل ذخایر کارخانه خوراک آرادان</Text>
-        <View style={styles.summaryRow}>
-          <View style={styles.summaryItem}>
-            <Text style={styles.summaryLabel}>کل موجودی فیزیکی</Text>
-            <Text style={styles.summaryVal}>{formatWeight(totalStockKg)}</Text>
-          </View>
-          <View style={styles.summaryDivider} />
-          <View style={styles.summaryItem}>
-            <Text style={styles.summaryLabel}>کل ظرفیت ذخیره‌سازی</Text>
-            <Text style={styles.summaryVal}>{formatWeight(totalCapacityKg)}</Text>
-          </View>
-          <View style={styles.summaryDivider} />
-          <View style={styles.summaryItem}>
-            <Text style={styles.summaryLabel}>ضریب اشغال کل</Text>
-            <Text style={[styles.summaryVal, styles.percentVal]}>{toPersianDigits(overallPercent)}٪</Text>
-          </View>
-        </View>
-      </View>
+    <ScreenContainer
+      scrollable={false}
+      title="انبار و سیلو"
+      subtitle="موجودی زنده مواد اولیه و خوراک آماده کارخانه"
+    >
+      <FlatList
+        data={visible}
+        keyExtractor={(item) => item.id}
+        renderItem={({ item }) => <ItemCard item={item} maxStockKg={summary.maxStockKg} />}
+        contentContainerStyle={styles.listContent}
+        refreshControl={
+          <RefreshControl
+            refreshing={inventoryQuery.isFetching && !inventoryQuery.isLoading}
+            onRefresh={() => inventoryQuery.refetch()}
+            colors={['#0284c7']}
+          />
+        }
+        ListHeaderComponent={
+          <View>
+            <SummaryCard summary={summary} />
 
-      {/* Warehouses list */}
-      {isLoading ? (
-        <View style={styles.loadingBox}>
-          <ActivityIndicator size="large" color="#0284c7" />
-          <Text style={styles.loadingText}>در حال دریافت موجودی انبارها...</Text>
-        </View>
-      ) : (
-        <FlatList
-          data={warehouses}
-          keyExtractor={(item) => item.id}
-          renderItem={renderItem}
-          contentContainerStyle={styles.listContent}
-          refreshControl={<RefreshControl refreshing={isRefetching} onRefresh={refetch} />}
-          ListEmptyComponent={
-            <View style={styles.emptyBox}>
-              <Text style={styles.emptyText}>اطلاعات انباری یافت نشد.</Text>
+            <View style={styles.filterRow}>
+              {FILTERS.map((f) => {
+                const active = f === filter;
+                const count = filterInventory(items, f).length;
+                return (
+                  <TouchableOpacity
+                    key={f}
+                    style={[styles.filterBtn, active && styles.filterBtnActive]}
+                    onPress={() => setFilter(f)}
+                  >
+                    <Text style={[styles.filterText, active && styles.filterTextActive]}>
+                      {INVENTORY_FILTER_LABELS[f]}
+                    </Text>
+                    <Text style={[styles.filterCount, active && styles.filterTextActive]}>
+                      {toPersianDigits(count)}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
             </View>
-          }
-        />
-      )}
+
+            {errorText ? (
+              <View style={styles.errorBox}>
+                <Text style={styles.errorText}>{errorText}</Text>
+              </View>
+            ) : null}
+          </View>
+        }
+        ListEmptyComponent={
+          inventoryQuery.isLoading ? (
+            <View style={styles.loadingBox}>
+              <ActivityIndicator size="large" color="#0284c7" />
+              <Text style={styles.loadingText}>در حال دریافت موجودی از سرور...</Text>
+            </View>
+          ) : errorText ? null : (
+            <View style={styles.emptyBox}>
+              <Text style={styles.emptyText}>
+                {items.length === 0
+                  ? 'هیچ قلم کالای فعالی روی سرور ثبت نشده است.'
+                  : 'با این فیلتر قلمی برای نمایش نیست.'}
+              </Text>
+              <Text style={styles.emptyHint}>
+                این فهرست فقط اقلام واقعی ثبت‌شده را نشان می‌دهد؛ اگر انتظار قلمی را دارید که اینجا نیست،
+                ابتدا باید در سامانه تعریف و فعال شود.
+              </Text>
+            </View>
+          )
+        }
+      />
     </ScreenContainer>
   );
 }
 
 const styles = StyleSheet.create({
+  listContent: {
+    padding: 14,
+    paddingBottom: 28,
+    gap: 10,
+  },
   summaryCard: {
     backgroundColor: '#0f172a',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 16,
-    shadowColor: '#000',
-    shadowOpacity: 0.1,
-    shadowOffset: { width: 0, height: 4 },
-    shadowRadius: 8,
-    elevation: 4,
+    borderRadius: 14,
+    padding: 14,
   },
   summaryTitle: {
     fontFamily: 'Vazirmatn_700Bold',
-    fontSize: 14,
-    color: '#38bdf8',
-    textAlign: 'center',
+    fontSize: 13,
+    color: '#ffffff',
+    textAlign: 'right',
     marginBottom: 12,
   },
   summaryRow: {
-    flexDirection: 'row',
+    flexDirection: 'row-reverse',
     justifyContent: 'space-between',
     alignItems: 'center',
   },
@@ -148,21 +246,58 @@ const styles = StyleSheet.create({
   },
   summaryVal: {
     fontFamily: 'Vazirmatn_700Bold',
-    fontSize: 12,
-    color: '#ffffff',
-  },
-  percentVal: {
-    color: '#38bdf8',
     fontSize: 14,
+    color: '#38bdf8',
+  },
+  summaryWarn: {
+    color: '#fbbf24',
+  },
+  summaryDanger: {
+    color: '#f87171',
   },
   summaryDivider: {
     width: 1,
     height: 28,
     backgroundColor: '#334155',
   },
-  listContent: {
-    paddingBottom: 24,
-    gap: 12,
+  summaryNote: {
+    fontFamily: 'Vazirmatn_400Regular',
+    fontSize: 10,
+    color: '#cbd5e1',
+    textAlign: 'right',
+    lineHeight: 17,
+    marginTop: 12,
+  },
+  filterRow: {
+    flexDirection: 'row-reverse',
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    padding: 4,
+    gap: 4,
+  },
+  filterBtn: {
+    flex: 1,
+    paddingVertical: 6,
+    alignItems: 'center',
+    borderRadius: 8,
+  },
+  filterBtnActive: {
+    backgroundColor: '#0284c7',
+  },
+  filterText: {
+    fontFamily: 'Vazirmatn_500Medium',
+    fontSize: 11,
+    color: '#334155',
+    textAlign: 'center',
+  },
+  filterTextActive: {
+    color: '#ffffff',
+  },
+  filterCount: {
+    fontFamily: 'Vazirmatn_700Bold',
+    fontSize: 11,
+    color: '#64748b',
+    marginTop: 2,
   },
   card: {
     backgroundColor: '#ffffff',
@@ -170,54 +305,26 @@ const styles = StyleSheet.create({
     padding: 14,
     borderWidth: 1,
     borderColor: '#e2e8f0',
-    shadowColor: '#000000',
-    shadowOpacity: 0.04,
-    shadowOffset: { width: 0, height: 2 },
-    shadowRadius: 6,
-    elevation: 2,
   },
   cardHeader: {
-    flexDirection: 'row',
+    flexDirection: 'row-reverse',
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 6,
   },
-  warehouseName: {
+  itemName: {
     fontFamily: 'Vazirmatn_700Bold',
     fontSize: 14,
     color: '#0f172a',
-  },
-  badge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
-  },
-  badgeNormal: {
-    backgroundColor: '#f0fdf4',
-    borderWidth: 1,
-    borderColor: '#bbf7d0',
-  },
-  badgeWarning: {
-    backgroundColor: '#fffbeb',
-    borderWidth: 1,
-    borderColor: '#fde68a',
-  },
-  badgeText: {
-    fontFamily: 'Vazirmatn_700Bold',
-    fontSize: 11,
-  },
-  badgeTextNormal: {
-    color: '#16a34a',
-  },
-  badgeTextWarning: {
-    color: '#d97706',
-  },
-  productName: {
-    fontFamily: 'Vazirmatn_500Medium',
-    fontSize: 12,
-    color: '#64748b',
-    marginBottom: 10,
+    flexShrink: 1,
     textAlign: 'right',
+  },
+  itemType: {
+    fontFamily: 'Vazirmatn_400Regular',
+    fontSize: 11,
+    color: '#64748b',
+    textAlign: 'right',
+    marginBottom: 10,
   },
   progressContainer: {
     height: 10,
@@ -235,8 +342,11 @@ const styles = StyleSheet.create({
   progressBarWarn: {
     backgroundColor: '#f59e0b',
   },
+  progressBarOut: {
+    backgroundColor: '#ef4444',
+  },
   statsRow: {
-    flexDirection: 'row',
+    flexDirection: 'row-reverse',
     gap: 8,
   },
   statBox: {
@@ -262,6 +372,27 @@ const styles = StyleSheet.create({
   stockVal: {
     color: '#0284c7',
   },
+  itemHint: {
+    fontFamily: 'Vazirmatn_400Regular',
+    fontSize: 10,
+    color: '#94a3b8',
+    textAlign: 'right',
+    marginTop: 8,
+  },
+  errorBox: {
+    backgroundColor: '#fef2f2',
+    borderWidth: 1,
+    borderColor: '#fecaca',
+    borderRadius: 8,
+    padding: 10,
+    marginTop: 10,
+  },
+  errorText: {
+    fontFamily: 'Vazirmatn_500Medium',
+    fontSize: 12,
+    color: '#b91c1c',
+    textAlign: 'right',
+  },
   loadingBox: {
     padding: 40,
     alignItems: 'center',
@@ -273,14 +404,27 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   emptyBox: {
-    padding: 40,
+    padding: 32,
     alignItems: 'center',
   },
   emptyText: {
-    fontFamily: 'Vazirmatn_400Regular',
+    fontFamily: 'Vazirmatn_500Medium',
     fontSize: 13,
+    color: '#475569',
+    textAlign: 'center',
+  },
+  emptyHint: {
+    fontFamily: 'Vazirmatn_400Regular',
+    fontSize: 11,
     color: '#94a3b8',
+    textAlign: 'center',
+    marginTop: 6,
+    lineHeight: 18,
   },
 });
 
 export default InventoryMonitorScreen;
+
+
+
+

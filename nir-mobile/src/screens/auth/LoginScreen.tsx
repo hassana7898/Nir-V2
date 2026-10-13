@@ -16,20 +16,16 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../hooks/useAuth';
 import { isValidIranianMobile } from '../../utils/persianText';
 import { OfflineStatusBar } from '../../components/common/OfflineStatusBar';
-import {
-  getApiBaseUrl,
-  setApiBaseUrl,
-  getOfflineDemoMode,
-  setOfflineDemoMode,
-} from '../../api/client';
+import { getApiBaseUrl, setApiBaseUrl, describeApiTarget } from '../../api/client';
+import { extractApiErrorMessage } from '../../api/errors';
 
 export function LoginScreen({ navigation }: any) {
-  const { requestOtp, loginWithPassword, loginOffline } = useAuth();
+  const { requestOtp, loginWithPassword } = useAuth();
 
   const [mode, setMode] = useState<'otp' | 'password'>('otp');
-  const [phone, setPhone] = useState('09121112233');
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('admin123');
+  const [phone, setPhone] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [totpCode, setTotpCode] = useState('');
   const [requires2FA, setRequires2FA] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -38,11 +34,11 @@ export function LoginScreen({ navigation }: any) {
   // Server settings modal state
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [currentUrl, setCurrentUrl] = useState(getApiBaseUrl());
-  const [isOfflineActive, setIsOfflineActive] = useState(getOfflineDemoMode());
+  const [apiTarget, setApiTarget] = useState(describeApiTarget());
 
   useEffect(() => {
     setCurrentUrl(getApiBaseUrl());
-    setIsOfflineActive(getOfflineDemoMode());
+    setApiTarget(describeApiTarget());
   }, []);
 
   const handleRequestOtp = async () => {
@@ -55,11 +51,11 @@ export function LoginScreen({ navigation }: any) {
     setLoading(true);
     try {
       const res = await requestOtp(phone);
-      navigation.navigate('OtpVerify', { phone, debugCode: res.debugCode || '123456' });
+      // debugCode is present ONLY when the server runs with MOBILE_OTP_DEBUG=true (dev tree);
+      // in the production flow the code arrives by SMS and the verification screen starts empty.
+      navigation.navigate('OtpVerify', { phone, debugCode: res.debugCode });
     } catch (err: any) {
-      setErrorMsg(
-        err.response?.data?.message || err.message || 'خطا در ارسال کد تایید پیامکی'
-      );
+      setErrorMsg(extractApiErrorMessage(err, 'خطا در ارسال کد تایید پیامکی'));
     } finally {
       setLoading(false);
     }
@@ -80,20 +76,7 @@ export function LoginScreen({ navigation }: any) {
         setErrorMsg('کد احراز هویت دومرحله‌ای (Authenticator) را وارد کنید.');
       }
     } catch (err: any) {
-      setErrorMsg(
-        err.response?.data?.message || err.message || 'نام کاربری یا کلمه عبور اشتباه است'
-      );
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleOfflineQuickLogin = async (role: 'DRIVER' | 'FARMER' | 'MANAGER') => {
-    setLoading(true);
-    try {
-      await loginOffline(role);
-    } catch (err: any) {
-      setErrorMsg('خطا در ورود آفلاین');
+      setErrorMsg(extractApiErrorMessage(err, 'نام کاربری یا کلمه عبور اشتباه است'));
     } finally {
       setLoading(false);
     }
@@ -104,9 +87,16 @@ export function LoginScreen({ navigation }: any) {
       Alert.alert('خطا', 'آدرس سرور نمی‌تواند خالی باشد');
       return;
     }
-    setApiBaseUrl(currentUrl.trim());
-    setOfflineDemoMode(isOfflineActive);
+
+    const decision = setApiBaseUrl(currentUrl.trim());
     setShowSettingsModal(false);
+    setApiTarget(describeApiTarget());
+
+    if (!decision.allowed) {
+      Alert.alert('آدرس رد شد', decision.reason || 'این آدرس برای این نسخه مجاز نیست.');
+      return;
+    }
+
     Alert.alert('موفقیت', 'تنظیمات سرور ذخیره شد.');
   };
 
@@ -141,53 +131,9 @@ export function LoginScreen({ navigation }: any) {
             </Text>
           </View>
 
-          {/* ONE-TOUCH OFFLINE ACCESS CARD */}
-          <View style={styles.offlineBox}>
-            <View style={styles.offlineTitleRow}>
-              <Text style={styles.boltIcon}>⚡</Text>
-              <Text style={styles.offlineTitle}>دسترسی سریع آفلاین (بدون نیاز به سرور)</Text>
-            </View>
-            <Text style={styles.offlineSubtitle}>
-              جهت تست، بررسی کارتابل‌ها و کار در شرایط عدم دسترسی به اینترنت یا سرور:
-            </Text>
-
-            <View style={styles.quickRolesRow}>
-              {/* Driver Quick Button */}
-              <TouchableOpacity
-                style={styles.quickRoleBtn}
-                onPress={() => handleOfflineQuickLogin('DRIVER')}
-                disabled={loading}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.roleIcon}>🚚</Text>
-                <Text style={styles.quickRoleTitle}>راننده</Text>
-                <Text style={styles.quickRoleDesc}>بارها، قبض و امضا</Text>
-              </TouchableOpacity>
-
-              {/* Farmer Quick Button */}
-              <TouchableOpacity
-                style={styles.quickRoleBtn}
-                onPress={() => handleOfflineQuickLogin('FARMER')}
-                disabled={loading}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.roleIcon}>🌾</Text>
-                <Text style={styles.quickRoleTitle}>مرغدار</Text>
-                <Text style={styles.quickRoleDesc}>دوره، وزن و سفارش</Text>
-              </TouchableOpacity>
-
-              {/* Manager Quick Button */}
-              <TouchableOpacity
-                style={styles.quickRoleBtn}
-                onPress={() => handleOfflineQuickLogin('MANAGER')}
-                disabled={loading}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.roleIcon}>🛡️</Text>
-                <Text style={styles.quickRoleTitle}>مدیر</Text>
-                <Text style={styles.quickRoleDesc}>KPI و مانیتورینگ</Text>
-              </TouchableOpacity>
-            </View>
+          {/* Environment banner: which server this build is talking to (there is no offline mode) */}
+          <View style={styles.infoBadge}>
+            <Text style={styles.infoBadgeText}>{apiTarget}</Text>
           </View>
 
           {/* Regular Online Login Card */}
@@ -231,7 +177,7 @@ export function LoginScreen({ navigation }: any) {
                   maxLength={11}
                 />
                 <Text style={styles.hintText}>
-                  کد تایید یکبارمصرف پیامک خواهد شد (کد آزمایشی: 123456).
+                  کد تایید یکبارمصرف به این شماره پیامک می‌شود؛ شماره باید از قبل در سامانه ثبت شده باشد.
                 </Text>
 
                 <TouchableOpacity
@@ -248,12 +194,6 @@ export function LoginScreen({ navigation }: any) {
               </View>
             ) : (
               <View style={styles.form}>
-                <View style={styles.infoBadge}>
-                  <Text style={styles.infoBadgeText}>
-                    اطلاعات پیش‌فرض: نام کاربری admin | رمز عبور admin123
-                  </Text>
-                </View>
-
                 <Text style={styles.fieldLabel}>نام کاربری:</Text>
                 <TextInput
                   style={styles.input}
@@ -444,70 +384,6 @@ const styles = StyleSheet.create({
     color: '#64748b',
     textAlign: 'center',
     marginTop: 4,
-  },
-  // OFFLINE QUICK BOX
-  offlineBox: {
-    backgroundColor: '#ffffff',
-    borderRadius: 16,
-    padding: 14,
-    marginBottom: 16,
-    borderWidth: 1.5,
-    borderColor: '#bae6fd',
-    shadowColor: '#0284c7',
-    shadowOpacity: 0.08,
-    shadowOffset: { width: 0, height: 3 },
-    shadowRadius: 6,
-    elevation: 2,
-  },
-  offlineTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: 4,
-  },
-  boltIcon: {
-    fontSize: 16,
-  },
-  offlineTitle: {
-    fontSize: 14,
-    fontWeight: 'bold',
-    color: '#0369a1',
-  },
-  offlineSubtitle: {
-    fontSize: 11,
-    color: '#64748b',
-    marginBottom: 12,
-    lineHeight: 18,
-  },
-  quickRolesRow: {
-    flexDirection: 'row',
-    gap: 8,
-    justifyContent: 'space-between',
-  },
-  quickRoleBtn: {
-    flex: 1,
-    backgroundColor: '#f8fafc',
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
-    borderRadius: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 4,
-    alignItems: 'center',
-  },
-  roleIcon: {
-    fontSize: 22,
-    marginBottom: 4,
-  },
-  quickRoleTitle: {
-    fontSize: 13,
-    fontWeight: 'bold',
-    color: '#1e293b',
-  },
-  quickRoleDesc: {
-    fontSize: 9,
-    color: '#64748b',
-    textAlign: 'center',
-    marginTop: 2,
   },
   // REGULAR LOGIN CARD
   card: {

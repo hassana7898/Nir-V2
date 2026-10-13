@@ -404,6 +404,24 @@ export async function runMigrations() {
       END $$;
     `);
 
+    // ---- Phase 1 mobile: driver <-> invoice foreign key (mirrors migrations/0005_mobile_driver_link.sql)
+    // Adds the FK the mobile API matches loads on. `driver_name` stays for backward compatibility;
+    // the name -> id data backfill runs separately (scripts/backfill-invoice-drivers.sql).
+    await client.query(`
+      ALTER TABLE invoices ADD COLUMN IF NOT EXISTS driver_id TEXT REFERENCES drivers(id);
+      CREATE INDEX IF NOT EXISTS idx_invoices_driver_id ON invoices(driver_id);
+    `);
+
+    // ---- Phase 2 mobile: driver-reported trip state (mirrors migrations/0006_mobile_trip_status.sql)
+    // NULL keeps the pre-Phase-2 meaning for every existing row: the mobile API then derives
+    // `assigned` / `delivered` from delivery_proofs. The web UI and the weighbridge worker never
+    // read or write these columns.
+    await client.query(`
+      ALTER TABLE invoices ADD COLUMN IF NOT EXISTS trip_status TEXT;
+      ALTER TABLE invoices ADD COLUMN IF NOT EXISTS trip_status_at TIMESTAMP;
+      CREATE INDEX IF NOT EXISTS idx_invoices_trip_status ON invoices(trip_status);
+    `);
+
     await client.query('COMMIT');
     console.log('[NIR MIGRATION] PostgreSQL schema successfully applied!');
   } catch (error) {

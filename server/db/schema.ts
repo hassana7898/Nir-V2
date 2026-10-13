@@ -10,6 +10,9 @@ export const users = pgTable("users", {
   // set true after the user proves possession by verifying a code from their authenticator.
   totpSecret: text("totp_secret"),
   is2faEnabled: boolean("is_2fa_enabled").default(false).notNull(),
+  phone: text("phone"),
+  driverId: text("driver_id").references(() => drivers.id),
+  farmerId: text("farmer_id").references(() => farmers.id),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -112,6 +115,15 @@ export const invoices = pgTable("invoices", {
   productId: text("product_id").notNull().references(() => products.id),
   productName: text("product_name"),
   driverName: text("driver_name"),
+  // Phase 1 (mobile): FK link to drivers. The legacy free-text `driver_name` above is kept for
+  // backward compatibility (web UI, weighbridge worker, legacy imports) and is backfilled into
+  // Phase 2 (mobile): the state the driver reports from the road (see migrations/0006_mobile_trip_status.sql).
+  // NULL = never reported; the mobile API then derives `assigned` / `delivered` from delivery_proofs,
+  // which is exactly how this feature behaved before Phase 2.
+  tripStatus: text("trip_status"),
+  tripStatusAt: timestamp("trip_status_at"),
+  // this column by scripts/backfill-invoice-drivers.sql.
+  driverId: text("driver_id").references(() => drivers.id),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
   deletedAt: timestamp("deleted_at"),
@@ -143,7 +155,7 @@ export const invoices = pgTable("invoices", {
   createdBy: text("created_by"),
 
   updatedBy: text("updated_by"),
-}, (t) => ({ updatedAtIdx: index("invoices_updated_at_idx").on(t.updatedAt), dateIdx: index("invoices_date_idx").on(t.date), typeIdx: index("invoices_type_idx").on(t.type), productIdIdx: index("invoices_product_id_idx").on(t.productId), farmerIdIdx: index("invoices_farmer_id_idx").on(t.farmerId) }));
+}, (t) => ({ updatedAtIdx: index("invoices_updated_at_idx").on(t.updatedAt), dateIdx: index("invoices_date_idx").on(t.date), typeIdx: index("invoices_type_idx").on(t.type), productIdIdx: index("invoices_product_id_idx").on(t.productId), farmerIdIdx: index("invoices_farmer_id_idx").on(t.farmerId), driverIdIdx: index("idx_invoices_driver_id").on(t.driverId), tripStatusIdx: index("idx_invoices_trip_status").on(t.tripStatus) }));
 
 export const batches = pgTable("batches", {
   id: text("id").primaryKey(),
@@ -346,3 +358,57 @@ export const weighbridge_records = pgTable("weighbridge_records", {
   statusIdx: index("weighbridge_records_status_idx").on(t.status),
   mappedIdx: index("weighbridge_records_mapped_idx").on(t.mappedRemittanceId),
 }));
+
+export const otp_codes = pgTable("otp_codes", {
+  id: serial("id").primaryKey(),
+  phone: text("phone").notNull(),
+  code: text("code").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  used: boolean("used").default(false),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (t) => ({
+  phoneIdx: index("idx_otp_phone").on(t.phone),
+  expiresIdx: index("idx_otp_expires").on(t.expiresAt),
+}));
+
+export const device_tokens = pgTable("device_tokens", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+  token: text("token").notNull(),
+  platform: text("platform").notNull(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (t) => ({
+  userIdx: index("idx_device_tokens_user").on(t.userId),
+}));
+
+export const delivery_proofs = pgTable("delivery_proofs", {
+  id: serial("id").primaryKey(),
+  invoiceId: text("invoice_id").references(() => invoices.id, { onDelete: "cascade" }),
+  driverId: text("driver_id").references(() => drivers.id),
+  photoBillUrl: text("photo_bill_url"),
+  photoScaleUrl: text("photo_scale_url"),
+  signatureUrl: text("signature_url"),
+  latitude: decimal("latitude", { precision: 10, scale: 7 }),
+  longitude: decimal("longitude", { precision: 10, scale: 7 }),
+  deliveredAt: timestamp("delivered_at").defaultNow(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (t) => ({
+  invoiceIdx: index("idx_delivery_invoice").on(t.invoiceId),
+  driverIdx: index("idx_delivery_driver").on(t.driverId),
+}));
+
+export const farmer_orders = pgTable("farmer_orders", {
+  id: serial("id").primaryKey(),
+  farmerId: text("farmer_id").references(() => farmers.id, { onDelete: "cascade" }),
+  productId: text("product_id").references(() => products.id),
+  requestedWeight: decimal("requested_weight", { precision: 12, scale: 2 }).notNull(),
+  targetDate: text("target_date").notNull(),
+  notes: text("notes"),
+  status: text("status").default("pending"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (t) => ({
+  farmerIdx: index("idx_orders_farmer").on(t.farmerId),
+  statusIdx: index("idx_orders_status").on(t.status),
+}));
+

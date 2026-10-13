@@ -22,6 +22,11 @@ const runtimeDdl: string[] = [
     'ALTER TABLE invoices ADD COLUMN IF NOT EXISTS notes text',
     'ALTER TABLE invoices ADD COLUMN IF NOT EXISTS created_by text',
     'ALTER TABLE invoices ADD COLUMN IF NOT EXISTS updated_by text',
+    'ALTER TABLE invoices ADD COLUMN IF NOT EXISTS driver_id text',
+    // Phase 2: driver-reported trip state (mirrors migrations/0006_mobile_trip_status.sql). Without
+    // these the Drizzle insert below references columns the PGlite mirror does not have.
+    'ALTER TABLE invoices ADD COLUMN IF NOT EXISTS trip_status text',
+    'ALTER TABLE invoices ADD COLUMN IF NOT EXISTS trip_status_at timestamp',
     'ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS reversal_of text',
     'ALTER TABLE sync_mutations ADD COLUMN IF NOT EXISTS payload_hash text',
     'ALTER TABLE sync_mutations ADD COLUMN IF NOT EXISTS status text DEFAULT \'success\'',

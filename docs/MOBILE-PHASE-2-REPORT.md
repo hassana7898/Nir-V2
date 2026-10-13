@@ -233,3 +233,97 @@ npm run build:dev                -> dist-dev stamped dev (باندل وب بدو
 | گزینه‌های عملی | (الف) همان APK فعلی برای تست ورود مدیر **همین امروز**؛ (ب) بیلد تازه پس از ۱ نوامبر یا با ارتقای پلن؛ (ج) `eas build --local` — این ماشین **Android SDK/JDK ندارد** (`ANDROID_HOME` خالی، `adb` نصب نیست) پس بدون نصب ابزارها عملی نیست. |
 
 
+
+---
+
+## ۹. فاز ۲ — کلاینت موبایل (کامل نوشته شد، آماده برای یک بیلد در ۱ نوامبر)
+
+> ادامه‌ی همین گزارش: کامیت `ac94d5b` نیمه‌ی **سرور** را آورد؛ این بخش نیمه‌ی **کلاینت** را کامل می‌کند
+> تا با سهمیه‌ی EAS در ۱ نوامبر، یک بیلد همه‌ی صفحه‌های جدید را با هم ببرد.
+
+### ۹‑۱. شماره‌ی شما روی dev مدیر شد و ورود زنده تایید شد
+
+```
+.\psremoting\dev-seed-mobile-manager.ps1 -Phone 09392893377
+DB: postgresql://***:***@127.0.0.1:5432/nir_dev
+PHONE: 09392893377
+MANAGER_SEED|09392893377|role=MANAGER|phone=09392893377
+```
+- هیچ خط `SHADOW|…` چاپ نشد؛ یعنی این شماره قبلاً به پرونده‌ی راننده/مرغدار گره نخورده بود و اسکریپت
+  نقش کسی را بی‌صدا عوض نکرد.
+- ورود زنده روی `https://dev.artadan.ir`:
+  `otp/request → debugCode` سپس `otp/verify → role=MANAGER, fullName="NIR Dev Manager",
+  userId=usr-mobile-test-manager-09392893377, hasToken=true`.
+- همان توکن: `/api/invoices?type=exit&limit=2&page=1 → total=2393`،
+  `/api/mobile/manager/unmatched-drivers?limit=2 → groups=61, invoices=225`.
+  یعنی با همان APK فعلی می‌توانید وارد شوید و صفحه‌های جدید را ببینید.
+
+### ۹‑۲. چه چیزی در کلاینت ساخته شد
+
+| # | صفحه | فایل | چه چیزی واقعاً از سرور می‌خواند |
+|---|---|---|---|
+| ۱ | حواله‌ها (فیلتر + بازه تاریخ + صفحه‌بندی) | `src/screens/manager/RemittancesScreen.tsx` (بازنویسی کامل) | `GET /api/invoices` با `type/search/startDate/endDate/page/limit` و شمارش زنده‌ی هر تب (خروجی ۲۳۹۳ / ورودی ۷۱۳) |
+| ۲ | راننده‌های نامطابق | `src/screens/manager/UnmatchedDriversScreen.tsx` (**جدید**) | `GET /api/mobile/manager/unmatched-drivers` با تب همه/خروجی/ورودی، جست‌وجوی نام، صفحه‌بندی و هشدار «اسکن ناقص» |
+| ۳ | بارهای من (گزارش وضعیت سفر) | `src/screens/driver/DriverLoadsScreen.tsx` (بازنویسی کامل) | `GET /api/mobile/driver/loads?scope=&page=&limit=` + `PATCH .../trip-status` با تایید لغو و پیام دقیق ۴۰۹ سرور |
+| ۴ | انبار و سیلو | `src/screens/manager/InventoryMonitorScreen.tsx` (بازنویسی کامل) | `GET /api/mobile/manager/kpi → inventory[].currentStock/minStock` |
+| ۵ | داشبورد شاخص‌ها | `src/screens/manager/ManagerKpiScreen.tsx` (اصلاح نام فیلدها) | `entryTonnageKg/exitTonnageKg/entryTonnageTon/todayInvoicesCount/weighbridgeTicketsToday/inventory` |
+
+ورودی منو: «امکانات بیشتر → راننده‌های نامطابق» (`MoreMenuScreen.tsx`) و مسیر
+`UnmatchedDrivers` در `ManagerNavigator.tsx`.
+
+### ۹‑۳. منطق خالص و تست‌پذیر (`src/features/**`)
+
+هیچ قاعده‌ای داخل JSX نماند؛ همه در ماژول‌های بدون React نوشته شد تا تست شوند:
+
+- `features/manager/remittanceList.ts` — ساخت query دقیق سرور، نرمال‌سازی صفحه، برچسب وزن/طرف حساب،
+  بازه‌های آماده (امروز/۷/۳۰ روز شمسی).
+- `features/manager/unmatchedDrivers.ts` — query گزارش، برچسب و رنگ «دلیل پیشنهاد»، هشدار سقف اسکن.
+- `features/manager/inventoryView.ts` — دسته‌بندی موجودی (ناموجود/کمتر از حد بحرانی/مطلوب) و خلاصه‌ها.
+- `features/driver/tripStatusFlow.ts` — آینه‌ی دقیق قواعد سرور: جریان شش‌مرحله‌ای، ممنوعیت برگشت،
+  نیاز `delivered` به رسید تحویل، پایانی‌بودن `cancelled`، و no-op بودن تکرار وضعیت.
+
+**تست‌ها:** `tests/tripStatusFlow.test.ts` (۹ تست) و `tests/phase2ManagerScreens.test.ts` (۱۲ تست) به
+`npm test` موبایل اضافه شدند. نتیجه‌ی اجرا: هر ۱۲ سوئیت موبایل `fail 0` (۷۶ تست) و هر ۱۰ سوئیت سرور
+`fail 0` (۱۰۰ تست) و `tsc --noEmit` موبایل پاک.
+
+### ۹‑۴. داده‌های ساختگی که پاک شد (مهم‌ترین بخش این گام)
+
+| قبلاً چه دیده می‌شد | واقعیت سرور | حالا چه می‌شود |
+|---|---|---|
+| «حواله‌ها» فقط جدیدترین ۵۰ ردیف یک نوع را می‌دید؛ فیلتر تاریخ و صفحه‌بندی نداشت | ۲۳۹۳ خروجی و ۷۱۳ ورودی | تب‌ها با شمارش واقعی + بازه‌ی شمسی + صفحه‌بندی سروری با خط «x از y حواله» |
+| چیپ وضعیت روی `status` با مقادیر `matched/pending/mismatch` | ستون `invoices.status` فقط `active`/حذف‌شده است | چیپ «توزین شده / در انتظار توزین» از `scaleWeight` واقعی |
+| دکمه‌ی «ثبت حواله» پیام موفقیت می‌داد بدون هیچ درخواستی به سرور | ثبت حواله به `productId` واقعی، هدر `X-Operation-Id` و انتخاب کالا نیاز دارد | دکمه برداشته شد و جایش یادداشت صادقانه آمد (ثبت از پنل وب) |
+| کارت «هشدارهای مغایرت وزن» عدد ۰ را از فیلدی می‌خواند که در پاسخ KPI وجود ندارد | `discrepanciesCount` در پاسخ نیست | کارت «حواله‌های امروز» از `todayInvoicesCount` واقعی |
+| موجودی انبار یک فهرست نمونه‌ی دستی بود (ذرت ۴۵۲ تن، کنجاله ۱۸۵ تن …) | `warehouses` روی هر دو محیط خالی است؛ موجودی واقعی در `products.current_stock` | تب انبار از KPI با برچسب «کمتر از حد بحرانی / ناموجود» و بدون هیچ ردیف نمونه |
+| وزن بار و نتیجه‌ی باسکول در یک عدد خلاصه می‌شد | `billWeight` و `scaleWeight` دو ستون جدا هستند | سه کادر: وزن بارنامه، وزن باسکول، وزن مرجع |
+
+### ۹‑۵. «نامشخص» محصول: اندازه‌گیری و اصلاح
+
+اندازه‌گیری روی `nir_dev` با `psremoting/dev-db-product-names.ps1`:
+
+```
+ entry | rows=713  | with_name=0    | with_product_id=713
+ exit  | rows=2393 | with_name=3    | with_product_id=2393
+```
+
+یعنی `invoices.product_name` عملاً خالی است و `product_id` همیشه پر است. دو اصلاح:
+
+1. `GET /api/mobile/driver/loads` — جویین با `products.name`؛ «بارهای من» دیگر «نامشخص» نشان نمی‌دهد.
+2. `GET /api/invoices` — فیلد **جدید** `masterProductName` فقط برای ردیف‌هایی که نام ذخیره‌شده خالی است.
+   فیلد `productName` دست‌نخورده ماند تا صفحه‌های وب دقیقاً همان چیزی را ببینند که امروز می‌بینند؛
+   کلاینت موبایل اول `productName` و بعد `masterProductName` را می‌خواند (`productLabel`).
+
+### ۹‑۶. آنچه هنوز نیست (صادقانه)
+
+- **اتصال پرونده‌ی راننده از موبایل:** گزارش نامطابق فقط خواندنی است؛ سرور اندپوینت نوشتن ندارد. دکمه‌ی
+  «اتصال» عمداً با توضیح غیرفعال است تا کسی روی دکمه‌ی بی‌اثر کلیک نکند.
+- **ثبت حواله از موبایل:** به انتخاب کالا (`productId`) و هدر `X-Operation-Id` نیاز دارد؛ گام بعدی آن است.
+- **تب «تحویل‌شده‌ها» روی dev کم‌جمعیت است:** فقط سفرهایی که رسید تحویل دارند در آن تب می‌آیند.
+
+### ۹‑۷. گام بعدی
+
+1. با همان APK فعلی وارد شوید (شماره‌ی شما اکنون مدیر است) و «حواله‌ها»، «انبار و سیلو» و داشبورد را ببینید.
+2. بعد از ۱ نوامبر یک بیلد کامل بگیرید؛ کل کلاینت (۵ صفحه + تست‌ها) آماده است.
+3. در صورت تایید شما، گام بعدی: اندپوینت سرور برای «اتصال پرونده راننده» + انتخابگر کالا برای ثبت حواله.
+
+

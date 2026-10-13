@@ -1,5 +1,7 @@
 node_modules/
 dist/
+dist-dev/
+
 dist-ssr/
 *.local
 
@@ -29,6 +31,13 @@ build-*.log
 build-*.txt
 build-*.err
 *.done
+*-done.txt
+*-out.txt
+*-err.txt
+npm-test*.txt
+mt-*.txt
+eas-*.txt
+logs/
 local-server*.log
 npm-install.log
 .eslintcache

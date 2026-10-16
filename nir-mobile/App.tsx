@@ -1,5 +1,5 @@
 import React, { Component, useEffect, useState, type ErrorInfo, type ReactNode } from 'react';
-import { View, Text, ActivityIndicator, StyleSheet, TouchableOpacity } from 'react-native';
+import { View, Text, ActivityIndicator, StyleSheet, TouchableOpacity, I18nManager } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
@@ -9,9 +9,19 @@ import {
   Vazirmatn_700Bold,
 } from '@expo-google-fonts/vazirmatn';
 
+import { setupRTL } from './src/design-system/theme/rtl';
 import { AuthProvider } from './src/contexts/AuthContext';
 import { RootNavigator } from './src/navigation/RootNavigator';
 import { initOfflineQueueAutoSync } from './src/services/offlineQueue';
+import {
+  UiPreviewApp,
+  isUiPreviewEnabled,
+  installPreviewNetwork,
+} from './src/dev/UiPreviewApp';
+
+// Enable RTL for the entire app (Persian / Arabic layout)
+setupRTL();
+I18nManager.allowRTL(true);
 
 // Root Error Boundary to eliminate silent white screens
 interface ErrorBoundaryProps {
@@ -102,6 +112,15 @@ export default function App() {
   }, []);
 
   const isReady = fontsLoaded || fontError || timedOut;
+
+  // Design-review harness. Mounted only when `EXPO_PUBLIC_UI_PREVIEW=1` AND the bundle is a dev
+  // build; both are compile-time constants, so a production bundle never enters this branch. It is
+  // checked before the normal tree so the reviewer gets the redesigned screens instead of a login
+  // gate, and it bypasses AuthContext only because it supplies fixture transport.
+  if (isUiPreviewEnabled && isReady) {
+    installPreviewNetwork();
+    return <UiPreviewApp />;
+  }
 
   if (!isReady) {
     return (

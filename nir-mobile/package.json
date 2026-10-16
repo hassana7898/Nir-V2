@@ -8,16 +8,20 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
-    "test": "tsx tests/mobileInfra.test.ts && tsx tests/networkAndOffline.test.ts && tsx tests/authFlow.test.ts && tsx tests/navigationFlow.test.ts && tsx tests/driverOfflineProof.test.ts && tsx tests/farmerDiscrepancy.test.ts && tsx tests/notifications.test.ts && tsx tests/environmentGuard.test.ts && tsx tests/podContract.test.ts && tsx tests/noMockFallback.test.ts && tsx tests/tripStatusFlow.test.ts && tsx tests/phase2ManagerScreens.test.ts"
+    "test": "tsx tests/mobileInfra.test.ts && tsx tests/networkAndOffline.test.ts && tsx tests/authFlow.test.ts && tsx tests/navigationFlow.test.ts && tsx tests/driverOfflineProof.test.ts && tsx tests/farmerDiscrepancy.test.ts && tsx tests/notifications.test.ts && tsx tests/environmentGuard.test.ts && tsx tests/podContract.test.ts && tsx tests/noMockFallback.test.ts && tsx tests/tripStatusFlow.test.ts && tsx tests/phase2ManagerScreens.test.ts && tsx tests/phase3FarmerOperator.test.ts && tsx tests/phase3Management.test.ts && tsx tests/broodValidation.test.ts && tsx tests/screenState.test.ts",
+    "test:mobile-client": "tsx tests/mobileInfra.test.ts && tsx tests/networkAndOffline.test.ts && tsx tests/authFlow.test.ts && tsx tests/navigationFlow.test.ts && tsx tests/driverOfflineProof.test.ts && tsx tests/farmerDiscrepancy.test.ts && tsx tests/notifications.test.ts && tsx tests/environmentGuard.test.ts && tsx tests/podContract.test.ts && tsx tests/noMockFallback.test.ts && tsx tests/tripStatusFlow.test.ts && tsx tests/phase2ManagerScreens.test.ts && tsx tests/phase3FarmerOperator.test.ts && tsx tests/phase3Management.test.ts && tsx tests/broodValidation.test.ts && tsx tests/screenState.test.ts"
   },
   "dependencies": {
     "@expo-google-fonts/vazirmatn": "^0.2.3",
+    "@expo/metro-runtime": "~3.2.3",
     "@react-native-community/netinfo": "11.3.1",
     "@react-navigation/bottom-tabs": "^6.6.1",
     "@react-navigation/native": "^6.1.18",
     "@react-navigation/native-stack": "^6.10.1",
     "@tanstack/react-query": "^5.59.0",
     "axios": "^1.20.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
     "expo": "~51.0.28",
     "expo-font": "~12.0.9",
     "expo-image-picker": "~15.0.7",
@@ -28,16 +32,20 @@
     "lucide-react-native": "^0.453.0",
     "nativewind": "^2.0.11",
     "react": "18.2.0",
+    "react-dom": "^18.2.0",
     "react-native": "0.74.5",
     "react-native-mmkv": "^2.12.2",
     "react-native-safe-area-context": "4.10.5",
     "react-native-screens": "~3.31.1",
     "react-native-signature-canvas": "^5.0.2",
     "react-native-svg": "15.2.0",
-    "react-native-webview": "13.8.6"
+    "react-native-web": "^0.19.13",
+    "react-native-webview": "13.8.6",
+    "tailwind-merge": "^2.6.1"
   },
   "devDependencies": {
     "@babel/core": "^7.20.0",
+    "@types/node": "^26.6.5",
     "@types/react": "~18.2.45",
     "tailwindcss": "3.3.2",
     "typescript": "~5.3.3"
